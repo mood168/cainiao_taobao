@@ -441,13 +441,15 @@ try:
                                 track_data = track_response.json()
                                 if track_data.get("status") != None:
                                     tracking_info = track_data.get("status")
+                                    memo_date = datetime.strptime(track_data.get("date"), "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
                                     errorCodeDescription = track_data.get("errorCodeDescription")
                                     errorCode = track_data.get("errorCode")
                                     # 將追蹤信息寫入文件
                                     with open(f'records/{current_order_id}.txt', 'a', encoding='utf-8') as f:
+                                        f.write(f'(自動寫入)新留言: {tracking_info}\n{memo_date}')
                                         f.write(f'\n\n貨態查詢:')
                                         if errorCode == 0:
-                                            f.write(f'\n結果: {track_response.text.replace('"', '')}\n')
+                                            f.write(f'\n結果: {track_response.text.replace('"', '').replace('\n', '')}\n')
                                         else:
                                             f.write(f'\n結果: {errorCodeDescription.replace('"', '')}\n')
                                     
