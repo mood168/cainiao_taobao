@@ -450,7 +450,47 @@ try:
                                             f.write(f'\n結果: {track_response.text.replace('"', '')}\n')
                                         else:
                                             f.write(f'\n結果: {errorCodeDescription.replace('"', '')}\n')
-                                
+                                    
+                                    # 添加留言
+                                    try:
+                                        print("準備添加留言...")
+                                        # 點擊留言按鈕
+                                        leave_message_btn = wait.until(EC.element_to_be_clickable(
+                                            (By.XPATH, "//span[contains(@class, 'next-btn-helper') and contains(text(), '留言')]")
+                                        ))
+                                        driver.execute_script("arguments[0].click();", leave_message_btn)
+                                        print("已點擊留言按鈕")
+                                        
+                                        # 等待留言對話框出現
+                                        wait.until(EC.presence_of_element_located(
+                                            (By.CSS_SELECTOR, 'div.leaveMessage-overlay-wrapper.opened')
+                                        ))
+                                        print("留言對話框已出現")
+                                        
+                                        # 找到並填寫留言框
+                                        message_textarea = wait.until(EC.presence_of_element_located(
+                                            (By.CSS_SELECTOR, 'textarea[name="memo"]')
+                                        ))
+                                        message_textarea.clear()
+                                        message_textarea.send_keys(str(tracking_info))
+                                        print("已填寫留言內容")
+                                        
+                                        # 點擊確認按鈕
+                                        confirm_btn = wait.until(EC.element_to_be_clickable(
+                                            (By.XPATH, "//span[contains(@class, 'leaveMessage-btn-helper') and contains(text(), '确认')]")
+                                        ))
+                                        driver.execute_script("arguments[0].click();", confirm_btn)
+                                        print("已點擊確認按鈕")
+                                        
+                                        # 等待留言對話框消失
+                                        wait.until_not(EC.presence_of_element_located(
+                                            (By.CSS_SELECTOR, 'div.leaveMessage-overlay-wrapper.opened')
+                                        ))
+                                        print("留言已成功送出")
+                                        
+                                    except Exception as e:
+                                        print(f"添加留言時發生錯誤: {str(e)}")
+                                        print("繼續處理其他步驟...")
                     except Exception as e:
                         print(f"調用 API 時發生錯誤: {str(e)}")
                     print(f"已完成數據寫入到 {current_order_id}.txt")
