@@ -121,6 +121,82 @@ try:
 
     retry_operation(navigate_to_task_page, max_retries=3, delay=5)
     
+    print("檢查工作狀態...")
+    
+    def check_and_switch_status():
+        # 等待狀態按鈕出現
+        status_button = wait.until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, 'span.Status--statusTrigger--1En5pHk')
+        ))
+        
+        # 檢查狀態文字
+        status_text = status_button.text.strip()
+        print(f"當前狀態: {status_text}")
+        
+        if status_text == "下班":
+            print("檢測到下班狀態,準備切換到上班...")
+            
+            # 移動滑鼠到狀態按鈕
+            actions = webdriver.ActionChains(driver)
+            actions.move_to_element(status_button).perform()
+            print("已移動滑鼠到狀態按鈕")
+            
+            # 等待彈出選單出現
+            wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, 'div.coneProtal-overlay-wrapper.opened')
+            ))
+            print("狀態選單已出現")
+            
+            try:
+                # 嘗試方法1: 通過 Status--statusItem--3UvMvXq 類別定位
+                online_option = wait.until(EC.element_to_be_clickable((
+                    By.XPATH, 
+                    "//span[contains(@class, 'Status--statusItem--3UvMvXq') and contains(text(), '上班')]"
+                )))
+            except:
+                try:
+                    # 嘗試方法2: 通過父元素定位
+                    online_option = wait.until(EC.element_to_be_clickable((
+                        By.XPATH,
+                        "//div[contains(@class, 'coneProtal-overlay-wrapper')]//span[contains(text(), '上班')]"
+                    )))
+                except:
+                    # 嘗試方法3: 最寬鬆的定位方式
+                    online_option = wait.until(EC.element_to_be_clickable((
+                        By.XPATH,
+                        "//*[contains(text(), '上班')]"
+                    )))
+            
+            # 使用 JavaScript 點擊,避免可能的覆蓋問題
+            driver.execute_script("arguments[0].click();", online_option)
+            print("已點擊上班選項")
+            
+            # 等待狀態更新
+            time.sleep(2)  # 等待狀態切換
+            
+            # 等待列表重新載入
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
+            time.sleep(2)  # 額外等待確保列表完全載入
+            
+            # 驗證狀態是否已更新
+            new_status = wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, 'span.Status--statusTrigger--1En5pHk')
+            )).text.strip()
+            
+            if new_status == "上班":
+                print("已成功切換到上班狀態")
+            else:
+                raise Exception(f"狀態切換失敗,當前狀態: {new_status}")
+        else:
+            print("當前已是上班狀態,無需切換")
+    
+    # 重試切換狀態操作
+    retry_operation(check_and_switch_status, max_retries=3, delay=2)
+    
+    # 確保列表已完全載入
+    wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
+    time.sleep(3)  # 額外等待確保列表穩定
+    
     print("開始尋找工單號連結...")
     
     def find_order_links():
@@ -225,7 +301,7 @@ try:
                 # 等待新窗口出現
                 wait.until(lambda d: len(d.window_handles) > len(old_handles))
                 new_handle = [h for h in driver.window_handles if h not in old_handles][0]
-                print(f"新窗口句柄: {new_handle}")
+                print(f"切換到新窗口: {new_handle}")
                 
                 # 切換到新窗口
                 driver.switch_to.window(new_handle)
@@ -415,11 +491,77 @@ try:
             
     print("\n所有工單處理完成!")
 
-    print("瀏覽器將保持開啟狀態。按Ctrl+C可以關閉程序。")
-    
-    while True:
-        time.sleep(1)
+    def switch_to_offline():
+        try:
+            print("\n準備切換到下班狀態...")
+            # 等待狀態按鈕出現
+            status_button = wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, 'span.Status--statusTrigger--1En5pHk')
+            ))
+            
+            # 移動滑鼠到狀態按鈕
+            actions = webdriver.ActionChains(driver)
+            actions.move_to_element(status_button).perform()
+            print("已移動滑鼠到狀態按鈕")
+            
+            # 等待彈出選單出現
+            wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, 'div.coneProtal-overlay-wrapper.opened')
+            ))
+            print("狀態選單已出現")
+            
+            try:
+                # 嘗試方法1: 通過 Status--statusItem--3UvMvXq 類別定位
+                offline_option = wait.until(EC.element_to_be_clickable((
+                    By.XPATH, 
+                    "//span[contains(@class, 'Status--statusItem--3UvMvXq') and contains(text(), '下班')]"
+                )))
+            except:
+                try:
+                    # 嘗試方法2: 通過父元素定位
+                    offline_option = wait.until(EC.element_to_be_clickable((
+                        By.XPATH,
+                        "//div[contains(@class, 'coneProtal-overlay-wrapper')]//span[contains(text(), '下班')]"
+                    )))
+                except:
+                    # 嘗試方法3: 最寬鬆的定位方式
+                    offline_option = wait.until(EC.element_to_be_clickable((
+                        By.XPATH,
+                        "//*[contains(text(), '下班')]"
+                    )))
+            
+            # 使用 JavaScript 點擊,避免可能的覆蓋問題
+            driver.execute_script("arguments[0].click();", offline_option)
+            print("已點擊下班選項")
+            
+            # 等待狀態更新
+            time.sleep(2)  # 等待狀態切換
+            
+            # 驗證狀態是否已更新
+            new_status = wait.until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, 'span.Status--statusTrigger--1En5pHk')
+            )).text.strip()
+            
+            if new_status == "下班":
+                print("已成功切換到下班狀態")
+            else:
+                raise Exception(f"狀態切換失敗,當前狀態: {new_status}")
+                
+        except Exception as e:
+            print(f"切換到下班狀態時發生錯誤: {str(e)}")
+            raise
 
+    # 切換到下班狀態
+    retry_operation(switch_to_offline, max_retries=3, delay=2)
+    
+    # 等待2秒
+    time.sleep(2)
+    print("準備關閉瀏覽器...")
+    
+    # 關閉瀏覽器
+    driver.quit()
+    print("瀏覽器已關閉")
+    
 except KeyboardInterrupt:
     print("\n檢測到Ctrl+C,正在優雅退出...")
 except Exception as e:
@@ -427,11 +569,6 @@ except Exception as e:
     print("錯誤詳情:")
     traceback.print_exc()
 finally:
-    print("程序結束,但瀏覽器將保持開啟")
-    # 確保driver變量存在且不為None時才保持開啟
     if driver:
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\n檢測到Ctrl+C,正在優雅退出...")
+        driver.quit()
+        print("瀏覽器已關閉")
