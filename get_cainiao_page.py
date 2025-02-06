@@ -226,9 +226,9 @@ try:
             if os.path.exists('processed_orders.json'):
                 with open('processed_orders.json', 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    print("\n已處理的工單列表:")
-                    for order_id, info in data.items():
-                        print(f"工單號: {order_id}, 處理時間: {info['processed_time']}")
+                    # print("\n已處理的工單列表:")
+                    # for order_id, info in data.items():
+                    #     print(f"工單號: {order_id}, 處理時間: {info['processed_time']}")
                     return data
             else:
                 print("\n未找到處理記錄文件,將創建新的記錄")
@@ -279,8 +279,7 @@ try:
             
             # 檢查是否已處理過
             if current_order_id in processed_orders:
-                print(f"\n工單 {current_order_id} 已於 {processed_orders[current_order_id]['processed_time']} 處理過")
-                print(f"跳過處理,繼續下一個工單")
+                print(f"\n工單 {current_order_id} 已於 {processed_orders[current_order_id]['processed_time']} 處理過,跳過處理,繼續下一個工單")
                 continue
                 
             print(f"\n開始處理第 {index}/{total_orders} 個工單: {current_order_id}")
@@ -393,24 +392,24 @@ try:
                         token = None  # 初始化 token 變量
                         token_success = False  # 添加標誌變量
                         
-                        print(f"正在請求 token, URL: {token_url}")
-                        print(f"請求數據: {token_data_str}")
+                        # print(f"正在請求 token, URL: {token_url}")
+                        # print(f"請求數據: {token_data_str}")
                         
                         try:
                             token_response = requests.post(token_url, headers=token_headers, data=token_data_str, timeout=30)
-                            print(f"API 響應狀態碼: {token_response.status_code}")
-                            print(f"API 響應內容: {token_response.text}")
+                            # print(f"API 響應狀態碼: {token_response.status_code}")
+                            # print(f"API 響應內容: {token_response.text}")
                             
                             if token_response.status_code == 200:
                                 token_data = token_response.json()
                                 if token_data.get("token") != None:
                                     token = token_data.get("token")
                                     token_success = True  # 設置成功標誌
-                                    print("成功獲取 token")
+                                    # print("成功獲取 token")
                                 else:
                                     error_msg = token_data.get("Message", "未知錯誤")
-                                    print(f"獲取 token 失敗,API 返回錯誤: {error_msg}")
-                                    print(f"完整響應: {token_data}")
+                                    # print(f"獲取 token 失敗,API 返回錯誤: {error_msg}")
+                                    # print(f"完整響應: {token_data}")
                             else:
                                 print(f"HTTP 請求失敗,狀態碼: {token_response.status_code}")
                                 print(f"錯誤響應: {token_response.text}")
