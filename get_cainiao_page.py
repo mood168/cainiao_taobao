@@ -8,8 +8,9 @@ from selenium.webdriver.chrome.options import Options
 import time
 import traceback
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
+from selenium.webdriver.support.select import Select
 
 # 設置Chrome選項
 chrome_options = Options()
@@ -449,49 +450,128 @@ try:
                                         f.write(f'\n\n貨態查詢:')
                                         if errorCode == 0:
                                             f.write(f'\n結果: {track_response.text.replace('"', '').replace('\n', '')}\n')
+                                            
+                                            # 只有在 errorCode == 0 時才添加結單留言
+                                            try:
+                                                print("準備點擊結單按鈕...")
+                                                # 點擊結單按鈕
+                                                close_ticket_btn = wait.until(EC.element_to_be_clickable(
+                                                    (By.XPATH, "//button[contains(@class, 'next-btn-primary')]//span[contains(@class, 'next-btn-helper') and contains(text(), '结单')]")
+                                                ))
+                                                driver.execute_script("arguments[0].click();", close_ticket_btn)
+                                                print("已點擊結單按鈕")
+                                                
+                                                # 等待結單對話框出現
+                                                time.sleep(2)
+                                                
+                                                # 檢查是否有下拉選單
+                                                dropdown_exists = False
+                                                try:
+                                                    # 使用更精確的選擇器檢查下拉選單
+                                                    dropdown = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'span[class*="structFinish-select-trigger"]')))
+                                                    dropdown_exists = True
+                                                except:
+                                                    dropdown_exists = False
+                                                
+                                                print(f"對話框類型: {'有下拉選單' if dropdown_exists else '無下拉選單'}")
+                                                
+                                                # 根據 status 內容決定回覆方式
+                                                status_lower = tracking_info.lower()
+                                                message = ""
+                                                dropdown_value = ""
+                                                
+                                                if dropdown_exists:
+                                                    # 規則1: 配送進度狀況
+                                                    if any(keyword in status_lower for keyword in ['包裹配達門市', '已完成包裹成功取件', '包裹已送達物流中心', '等待配送中', '進行配送中']):
+                                                        dropdown_value = "已完成物流履約"
+                                                        message = tracking_info
+                                                    
+                                                    # 規則2: 廠商準備出貨
+                                                    elif '廠商已準備出貨' in status_lower:
+                                                        dropdown_value = "包裹實際未交接、未收到包裹"
+                                                        message = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
+                                                    
+                                                    # 規則3: 離島或持續未配送
+                                                    elif any(keyword in status_lower for keyword in ['取件門市位於離島地區', '持續未配送', '一直卡在']):
+                                                        dropdown_value = "不可抗力已報備"
+                                                        message = "因取件門市位於離島地區，船班需視當地海象氣候配送，包裹到店將發送簡訊通知，還請以到店簡訊通知為主，造成不便，敬請見諒，感謝"
+                                                    
+                                                    # 規則4: 退貨相關
+                                                    elif any(keyword in status_lower for keyword in ['已送達物流中心', '退貨處理中', '已退回廠商']):
+                                                        dropdown_value = "包裹實際已交接給XXX物流商、下一階段"
+                                                        current_date = datetime.now()
+                                                        message = f"已退回清關行，廠退日{current_date.strftime('%m/%d')}"
+                                                    
+                                                    # 規則5: 逾期未取
+                                                    elif any(keyword in status_lower for keyword in ['消費者逾期未取', '包裹已送達物流中心，進行退貨處理中']):
+                                                        if '已退回廠商' in status_lower:
+                                                            dropdown_value = "包裹實際已交接給XXX物流商、下一階段"
+                                                            current_date = datetime.now()
+                                                            message = f"已退回清關行，廠退日{current_date.strftime('%m/%d')}"
+                                                        else:
+                                                            dropdown_value = "無法物流履約，不需要菜鳥協助"
+                                                            future_date = datetime.now() + timedelta(days=7)
+                                                            message = f"天猫海外回复包裹状态：將退回清關行、具体原因：逾期未取、天猫海外预计时间：{future_date.strftime('%Y-%m-%d')}"
+                                                    
+                                                    # 規則6: 門市因素
+                                                    elif '因門市因素無法配送' in status_lower:
+                                                        message = "因門市因素無法配送，請與賣方客服聯繫重選取件門市"
+                                                        if '已退回廠商' in status_lower:
+                                                            dropdown_value = "包裹實際已交接給XXX物流商、下一階段"
+                                                            current_date = datetime.now()
+                                                            message = f"已退回清關行，廠退日{current_date.strftime('%m/%d')}"
+                                                        else:
+                                                            dropdown_value = "無法物流履約，不需要菜鳥協助"
+                                                            future_date = datetime.now() + timedelta(days=7)
+                                                            message = f"天猫海外回复包裹状态：將退回清關行、具体原因：門市關轉、天猫海外预计时间：{future_date.strftime('%Y-%m-%d')}"
+                                                    
+                                                    # 如果有下拉選單，選擇對應選項
+                                                    if dropdown_value:
+                                                        # 點擊下拉選單
+                                                        driver.execute_script("arguments[0].click();", dropdown)
+                                                        time.sleep(1)
+                                                        
+                                                        # 選擇選項
+                                                        option = wait.until(EC.element_to_be_clickable(
+                                                            (By.XPATH, f"//div[contains(@class, 'structFinish-select-menu')]//span[contains(text(), '{dropdown_value}')]")
+                                                        ))
+                                                        driver.execute_script("arguments[0].click();", option)
+                                                        print(f"已選擇下拉選單選項: {dropdown_value}")
+                                                else:
+                                                    # 如果沒有下拉選單，直接使用 status 作為訊息
+                                                    message = tracking_info
+                                                
+                                                # 填寫訊息框
+                                                message_textarea = wait.until(EC.presence_of_element_located(
+                                                    (By.CSS_SELECTOR, 'textarea[name="memo"]')
+                                                ))
+                                                message_textarea.clear()
+                                                message_textarea.send_keys(message)
+                                                print(f"已填寫訊息: {message}")
+                                                
+                                                # 點擊確認按鈕
+                                                if dropdown_exists:
+                                                    confirm_btn = wait.until(EC.element_to_be_clickable(
+                                                        (By.XPATH, "//button[contains(@class, 'structFinish-btn-primary')]//span[contains(@class, 'structFinish-btn-helper') and contains(text(), '確定')]")
+                                                    ))
+                                                else:
+                                                    confirm_btn = wait.until(EC.element_to_be_clickable(
+                                                        (By.XPATH, "//button[contains(@class, 'cDeskStructFunctionComponent-btn-primary')]//span[contains(text(), '確定並提交')]")
+                                                    ))
+                                                
+                                                driver.execute_script("arguments[0].click();", confirm_btn)
+                                                print("已點擊確認按鈕")
+                                                
+                                                # 等待結單操作完成
+                                                time.sleep(2)
+                                                print("結單操作已完成")
+                                                
+                                            except Exception as e:
+                                                print(f"處理結單操作時發生錯誤: {str(e)}")
+                                                print("繼續處理其他步驟...")
                                         else:
                                             f.write(f'\n結果: {errorCodeDescription.replace('"', '')}\n')
-                                    
-                                    # 添加留言
-                                    try:
-                                        print("準備添加留言...")
-                                        # 點擊留言按鈕
-                                        leave_message_btn = wait.until(EC.element_to_be_clickable(
-                                            (By.XPATH, "//span[contains(@class, 'next-btn-helper') and contains(text(), '留言')]")
-                                        ))
-                                        driver.execute_script("arguments[0].click();", leave_message_btn)
-                                        print("已點擊留言按鈕")
-                                        
-                                        # 等待留言對話框出現
-                                        wait.until(EC.presence_of_element_located(
-                                            (By.CSS_SELECTOR, 'div.leaveMessage-overlay-wrapper.opened')
-                                        ))
-                                        print("留言對話框已出現")
-                                        
-                                        # 找到並填寫留言框
-                                        message_textarea = wait.until(EC.presence_of_element_located(
-                                            (By.CSS_SELECTOR, 'textarea[name="memo"]')
-                                        ))
-                                        message_textarea.clear()
-                                        message_textarea.send_keys(str(tracking_info))
-                                        print("已填寫留言內容")
-                                        
-                                        # 點擊確認按鈕
-                                        confirm_btn = wait.until(EC.element_to_be_clickable(
-                                            (By.XPATH, "//span[contains(@class, 'leaveMessage-btn-helper') and contains(text(), '确认')]")
-                                        ))
-                                        driver.execute_script("arguments[0].click();", confirm_btn)
-                                        print("已點擊確認按鈕")
-                                        
-                                        # 等待留言對話框消失
-                                        wait.until_not(EC.presence_of_element_located(
-                                            (By.CSS_SELECTOR, 'div.leaveMessage-overlay-wrapper.opened')
-                                        ))
-                                        print("留言已成功送出")
-                                        
-                                    except Exception as e:
-                                        print(f"添加留言時發生錯誤: {str(e)}")
-                                        print("繼續處理其他步驟...")
+                                            print(f"由於 errorCode 不為 0 (當前值: {errorCode}), 跳過結單操作")
                     except Exception as e:
                         print(f"調用 API 時發生錯誤: {str(e)}")
                     print(f"已完成數據寫入到 {current_order_id}.txt")
