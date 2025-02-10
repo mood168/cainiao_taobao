@@ -29,6 +29,9 @@ ENV/
 *.log
 *.txt
 
+#build
+build/
+dist/
 # 其他
 .DS_Store
 Thumbs.db 
