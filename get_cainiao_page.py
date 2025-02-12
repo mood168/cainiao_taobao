@@ -5,6 +5,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
 import time
 import traceback
 import re
@@ -67,7 +69,10 @@ try:
     print("開始執行自動化流程...")
     
     # 初始化WebDriver時添加選項
-    driver = webdriver.Chrome(options=chrome_options)
+    driver = webdriver.Chrome(
+        service=ChromeService(ChromeDriverManager().install()),  # 自動管理驅動版本
+        options=chrome_options
+    )
     wait = WebDriverWait(driver, 30)  # 增加默認等待時間
     print("瀏覽器已啟動")
     log_message(driver, "瀏覽器已啟動")
@@ -156,7 +161,6 @@ try:
     # 導向到任務頁面
     target_url = 'https://desk.cainiao.com/unified/myTask/pendingTask'
     print(f"正在導向到任務頁面: {target_url}")
-    log_message(driver, f"正在導向到任務頁面: {target_url}")
     def navigate_to_task_page():
         driver.get(target_url)
         wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
@@ -268,6 +272,17 @@ try:
         if not order_links:
             log_message(driver, "找不到工單號連結")
             raise Exception("找不到工單號連結")
+        # 移除重複的工單連結
+        unique_order_links = []
+        seen_order_ids = set()
+        
+        for link in order_links:
+            order_id = link.text.strip()
+            if order_id not in seen_order_ids:
+                seen_order_ids.add(order_id)
+                unique_order_links.append(link)
+        
+        order_links = unique_order_links
         print(f"找到 {len(order_links)} 個工單號連結")
         log_message(driver, f"找到 {len(order_links)} 個工單號連結")
         return order_links
@@ -498,7 +513,7 @@ try:
                                 track_data = track_response.json()
                                 if track_data.get("status") != None:
                                     tracking_info = track_data.get("status")
-                                    log_message(driver, f"貨態: {tracking_info}")
+                                    log_message(driver, f'貨態: {tracking_info}')
                                     # 修改日期格式處理
                                     date_str = track_data.get("date")
                                     try:
@@ -515,7 +530,7 @@ try:
                                     errorCodeDescription = track_data.get("errorCodeDescription")
                                     errorCode = track_data.get("errorCode")
                                     # 將追蹤信息寫入文件
-                                    log_message(driver, f'(自動寫入)新留言')
+                                    # log_message(driver, f'(自動寫入)新留言')
                                     with open(f'records/{current_order_id}.txt', 'a', encoding='utf-8') as f:
                                         f.write(f'(自動寫入)新留言: {tracking_info}\n{memo_date}')
                                         f.write(f'\n\n貨態查詢:')
@@ -528,14 +543,23 @@ try:
                                     if errorCode == 0:  # 只有在 errorCode = 0 時才執行結單操作
                                         try:
                                             print("準備點擊結單按鈕...")
-                                            log_message(driver, "準備點擊結單按鈕...")
                                             # 使用更短的等待時間尋找結單按鈕
-                                            finish_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
-                                                (By.XPATH, "//span[contains(@class, 'next-btn-helper') and contains(text(), '结单')]")
-                                            ))
-                                            driver.execute_script("arguments[0].click();", finish_btn)
-                                            print("已點擊結單按鈕")
-                                            log_message(driver, "已點擊結單按鈕")
+                                            try:
+                                                finish_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
+                                                    (By.XPATH, "//span[contains(@class, 'next-btn-helper') and contains(text(), '结单')]")
+                                                ))
+                                                driver.execute_script("arguments[0].click();", finish_btn)
+                                                print("已點擊結單按鈕")
+                                            except:
+                                                print("找不到結單按鈕，嘗試使用留言按鈕...")
+                                                log_message(driver, "找不到結單按鈕，嘗試使用留言按鈕...")
+                                                # 尋找並點擊留言按鈕
+                                                message_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
+                                                    (By.XPATH, "//button[contains(@class, 'next-btn next-small next-btn-normal ticket-detail-buttons-item')]//span[contains(text(), '留言')]")
+                                                ))
+                                                driver.execute_script("arguments[0].click();", message_btn)
+                                                print("已點擊留言按鈕")
+                                                
                                             # 等待結單對話框出現
                                             time.sleep(2)  # 等待對話框完全顯示
                                             # 檢查是否有下拉選單
@@ -553,72 +577,76 @@ try:
                                             
                                             # 根據不同情況處理
                                             if has_dropdown:
-                                                # 點擊下拉選單
-                                                dropdown.click()
-                                                time.sleep(1)
-                                                log_message(driver, "已點擊下拉選單")
-                                                # 根據tracking_info選擇對應選項
-                                                delivery_keywords = ["包裹配達門市", "包裹已成功取件", "包裹已送達物流中心，進行理貨中", "等待配送中", "包裹配送中"]
-                                                preparation_keywords = ["廠商已準備出貨"]
-                                                force_majeure_keywords = ["持續未配送", "取件門市位於離島地區"]
-                                                return_keywords = ["包裹逾期未領，已送回物流中心", "包裹已送達物流中心，進行退貨處理中"]
-                                                store_issue_keywords = ["因門市因素無法配送，請與賣方客服聯繫重選取件門市", "請與賣方客服聯繫"]
+                                                with open(f'需要廠退日_暫不處理單.txt', 'a', encoding='utf-8') as f:
+                                                    f.write(f'工單號:{current_order_id} : 需要廠退日_暫不處理單,貨態:{tracking_info},貨態時間:{memo_date}\n')
+                                                # # 點擊下拉選單
+                                                # dropdown.click()
+                                                # time.sleep(1)
+                                                # log_message(driver, "已點擊下拉選單")
+                                                # # 根據tracking_info選擇對應選項
+                                                # delivery_keywords = ["包裹配達門市", "包裹已成功取件", "包裹已送達物流中心，進行理貨中", "等待配送中", "包裹配送中"]
+                                                # preparation_keywords = ["廠商已準備出貨"]
+                                                # force_majeure_keywords = ["持續未配送", "取件門市位於離島地區"]
+                                                # return_keywords = ["包裹逾期未領，已送回物流中心", "包裹已送達物流中心，進行退貨處理中"]
+                                                # store_issue_keywords = ["因門市因素無法配送，請與賣方客服聯繫重選取件門市", "請與賣方客服聯繫"]
                                                 
-                                                # 設置默認回覆訊息
-                                                reply_message = tracking_info
-                                                option_text = ""
+                                                # # 設置默認回覆訊息
+                                                # reply_message = tracking_info
+                                                # option_text = ""
                                                 
-                                                # 根據關鍵字選擇選項和設置回覆訊息
-                                                if any(keyword in tracking_info for keyword in preparation_keywords):
-                                                    option_text = "包裹实际未交接、未收到包裹"
-                                                    reply_message = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
-                                                elif any(keyword in tracking_info for keyword in force_majeure_keywords):
-                                                    option_text = "不可抗力已报备"
-                                                    reply_message = "因取件門市位於離島地區，船班需視當地海象氣候配送，包裹到店將發送簡訊通知，還請以到店簡訊通知為主，造成不便，敬請見諒，感謝"
-                                                elif any(keyword in tracking_info for keyword in return_keywords):
-                                                    option_text = "无法物流履约，不需要菜鸟协助"
-                                                    future_date = (datetime.now() + timedelta(days=7)).strftime("%m/%d")
-                                                    reply_message = f"將退回清關行、具体原因：逾期未取、天猫海外预计时间：{future_date}"
-                                                elif any(keyword in tracking_info for keyword in store_issue_keywords):
-                                                    option_text = "无法物流履约，不需要菜鸟协助"
-                                                    future_date = (datetime.now() + timedelta(days=7)).strftime("%m/%d")
-                                                    reply_message = f"將退回清關行、具体原因：門市關轉、天猫海外预计时间：{future_date}"
-                                                else:
-                                                    #寫入記錄
-                                                    with open(f'records/需要廠退日_暫不處理單.txt', 'a', encoding='utf-8') as f:
-                                                        f.write(f'工單號:{current_order_id} : 需要廠退日_暫不處理單,貨態:{tracking_info},貨態時間:{memo_date}\n')
+                                                # # 根據關鍵字選擇選項和設置回覆訊息
+                                                # if any(keyword in tracking_info for keyword in preparation_keywords):
+                                                #     option_text = "包裹实际未交接、未收到包裹"
+                                                #     reply_message = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
+                                                # elif any(keyword in tracking_info for keyword in force_majeure_keywords):
+                                                #     option_text = "不可抗力已报备"
+                                                #     reply_message = "因取件門市位於離島地區，船班需視當地海象氣候配送，包裹到店將發送簡訊通知，還請以到店簡訊通知為主，造成不便，敬請見諒，感謝"
+                                                # elif any(keyword in tracking_info for keyword in return_keywords):
+                                                #     option_text = "无法物流履约，不需要菜鸟协助"
+                                                #     future_date = (datetime.now() + timedelta(days=7)).strftime("%m/%d")
+                                                #     reply_message = f"將退回清關行、具体原因：逾期未取、天猫海外预计时间：{future_date}"
+                                                # elif any(keyword in tracking_info for keyword in store_issue_keywords):
+                                                #     option_text = "无法物流履约，不需要菜鸟协助"
+                                                #     future_date = (datetime.now() + timedelta(days=7)).strftime("%m/%d")
+                                                #     reply_message = f"將退回清關行、具体原因：門市關轉、天猫海外预计时间：{future_date}"
+                                                # else:
+                                                #     #寫入記錄
+                                                #     with open(f'records/需要廠退日_暫不處理單.txt', 'a', encoding='utf-8') as f:
+                                                #         f.write(f'工單號:{current_order_id} : 需要廠退日_暫不處理單,貨態:{tracking_info},貨態時間:{memo_date}\n')
                                                 
-                                                if option_text:
-                                                    # 選擇下拉選單選項
-                                                    option = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((
-                                                        By.XPATH, f"//span[contains(text(), '{option_text}')]"
-                                                    )))
-                                                    driver.execute_script("arguments[0].click();", option)
-                                                    print(f"已選擇選項: {option_text}")
+                                                # if option_text:
+                                                #     # 選擇下拉選單選項
+                                                #     option = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((
+                                                #         By.XPATH, f"//span[contains(text(), '{option_text}')]"
+                                                #     )))
+                                                #     driver.execute_script("arguments[0].click();", option)
+                                                #     print(f"已選擇選項: {option_text}")
                                                 
-                                                # 找到備註文本框
-                                                memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
-                                                    (By.CSS_SELECTOR, 'textarea[name="memo"]')
-                                                ))
+                                                # # 找到備註文本框
+                                                # memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
+                                                #     (By.CSS_SELECTOR, 'textarea[name="memo"]')
+                                                # ))
                                                 
-                                                # 使用剪貼板貼上文字
-                                                pyperclip.copy(reply_message)  # 將文字複製到剪貼板
-                                                actions = webdriver.ActionChains(driver)
-                                                actions.click(memo_textarea).perform()  # 點擊文本框
-                                                memo_textarea.clear()  # 清空文本框
-                                                actions.key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()  # 貼上
-                                                time.sleep(0.5)
+                                                # # 使用剪貼板貼上文字
+                                                # pyperclip.copy(reply_message)  # 將文字複製到剪貼板
+                                                # actions = webdriver.ActionChains(driver)
+                                                # actions.click(memo_textarea).perform()  # 點擊文本框
+                                                # memo_textarea.clear()  # 清空文本框
+                                                # actions.key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()  # 貼上
+                                                # time.sleep(0.5)
                                                 
-                                                # 點擊確定按鈕
-                                                confirm_btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((
-                                                    By.XPATH, "//span[contains(@class, 'structFinish-btn-helper') and contains(text(), '确定')]"
-                                                )))
+                                                # # 點擊確定按鈕
+                                                # confirm_btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((
+                                                #     By.XPATH, "//span[contains(@class, 'structFinish-btn-helper') and contains(text(), '确定')]"
+                                                # )))
                                             else:
                                                 # 沒有下拉選單的情況
                                                 memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
                                                     (By.CSS_SELECTOR, 'textarea[name="memo"]')
                                                 ))
-                                                
+                                                preparation_keywords = ["廠商已準備出貨"]
+                                                if any(keyword in tracking_info for keyword in preparation_keywords):
+                                                    tracking_info = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
                                                 # 使用剪貼板貼上文字
                                                 pyperclip.copy(tracking_info)  # 將文字複製到剪貼板
                                                 actions = webdriver.ActionChains(driver)
@@ -632,14 +660,14 @@ try:
                                                     By.XPATH, "//span[contains(@class, 'cDeskStructFunctionComponent-btn-helper') and contains(text(), '确定并提交')]"
                                                 )))
                                                         
-                                            # 點擊確認按鈕
-                                            driver.execute_script("arguments[0].click();", confirm_btn)
-                                            print("已點擊確認按鈕")
-                                            log_message(driver, "已點擊確認按鈕")
-                                            # 等待結單對話框消失
-                                            time.sleep(2)
-                                            print("結單完成")
-                                            log_message(driver, "結單完成")
+                                                # 點擊確認按鈕
+                                                driver.execute_script("arguments[0].click();", confirm_btn)
+                                                print("已點擊確認按鈕")
+                                                # log_message(driver, "已點擊確認按鈕")
+                                                # 等待結單對話框消失
+                                                time.sleep(2)
+                                                print("結單完成")
+                                                log_message(driver, "結單完成")
                                         except Exception as e:
                                             print(f"找不到結單按鈕或結單時發生錯誤: {str(e)}")
                                             log_message(driver, f"找不到結單按鈕或結單時發生錯誤: {str(e)},關閉視窗並繼續下一筆...")
@@ -658,6 +686,8 @@ try:
                                     else:
                                         print(f"errorCode 不為 0 (當前值: {errorCode}), 跳過結單操作")
                                         log_message(driver, f"errorCode 不為 0 (當前值: {errorCode}), 跳過結單操作")
+                                        with open(f'貨態查詢失敗_無法處理單.txt', 'a', encoding='utf-8') as f:
+                                            f.write(f'工單號:{current_order_id} : 錯誤描述: {errorCodeDescription}\n')
                                         # 關閉當前視窗並切換回原始視窗
                                         try:
                                             driver.close()
@@ -715,6 +745,7 @@ try:
             
     print("\n所有工單處理完成!")
     log_message(driver, "\n所有工單處理完成!")
+
     def switch_to_offline():
         try:
             print("\n準備切換到下班狀態...")
@@ -779,8 +810,65 @@ try:
             log_message(driver, f"切換到下班狀態時發生錯誤: {str(e)}")
             raise
 
-    # 切換到下班狀態
-    retry_operation(switch_to_offline, max_retries=3, delay=2)
+    def reload_and_check():
+        try:
+            print("\n重新載入頁面...")
+            log_message(driver, "\n重新載入頁面...")
+            driver.refresh()
+            # 等待頁面加載完成
+            wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
+            # 等待表格元素出現
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
+            time.sleep(5)  # 額外等待動態內容
+            
+            # 重新獲取工單連結
+            order_links = retry_operation(find_order_links, max_retries=10, delay=3)
+            total_orders = len(order_links)
+            print(f"檢查到 {total_orders} 個工單")
+            log_message(driver, f"檢查到 {total_orders} 個工單")
+            return total_orders, order_links
+            
+        except Exception as e:
+            print(f"重新載入頁面時發生錯誤: {str(e)}")
+            log_message(driver, f"重新載入頁面時發生錯誤: {str(e)}")
+            return 0, []
+
+    while True:
+        
+        order_links = reload_and_check()
+        
+        if len(order_links) > 0:
+            print("等候處理新工單...")
+            log_message(driver, "等候處理新工單...")
+            # 處理新的工單
+            for index, order_link in enumerate(order_links, 1):
+                # 這裡重用原本處理工單的代碼
+                current_order_id = None
+                try:
+                    current_order_id = order_link.text
+                    order_url = order_link.get_attribute('href')
+                    # ... 原本處理工單的代碼 ...
+                except Exception as e:
+                    print(f"處理工單時發生錯誤: {str(e)}")
+                    log_message(driver, f"處理工單時發生錯誤: {str(e)}")
+                    continue
+            time.sleep(600) 
+        # 若是當下時間是18:00,切換到下班狀態
+        else:
+            print("目前沒有新工單，10分鐘後重新檢查...")
+            log_message(driver, "目前沒有新工單，10分鐘後重新檢查...")
+            time.sleep(600)  # 等待10分鐘
+            
+            # 檢查當前時間是否為18:00
+            if datetime.now().hour == 18:
+                print("已到達下班時間（18:00）")
+                log_message(driver, "已到達下班時間（18:00）")
+                retry_operation(switch_to_offline, max_retries=3, delay=2)
+                break  # 跳出循環，結束程式
+
+    # 若是當下時間是18:00,切換到下班狀態
+    if datetime.now().hour == 18:
+        retry_operation(switch_to_offline, max_retries=3, delay=2)
     
     # 等待2秒
     # time.sleep(2)
