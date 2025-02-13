@@ -335,7 +335,6 @@ try:
     # 載入已處理的工單記錄
     processed_orders = load_processed_orders()
     print(f"已載入處理記錄,共 {len(processed_orders)} 個工單")
-    log_message(driver, f"已載入處理記錄,共 {len(processed_orders)} 個工單")
     # 檢查並建立records資料夾
     if not os.path.exists('records'):
         os.makedirs('records')
@@ -519,13 +518,13 @@ try:
                                     try:
                                         if "T" in date_str:
                                             # 處理包含 'T' 的ISO格式
-                                            memo_date = datetime.strptime(date_str.split('.')[0], "%Y-%m-%dT%H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+                                            memo_date = datetime.strptime(date_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
                                         else:
                                             # 處理標準格式
-                                            memo_date = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+                                            memo_date = datetime.strptime(date_str, "%Y%m%d%H%M%S")
                                     except Exception as e:
                                         print(f"日期格式轉換錯誤: {str(e)}")
-                                        memo_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                        memo_date = datetime.now()
                                     
                                     errorCodeDescription = track_data.get("errorCodeDescription")
                                     errorCode = track_data.get("errorCode")
@@ -574,21 +573,23 @@ try:
                                             except:
                                                 print("檢測到沒有下拉選單")
                                                 log_message(driver, "檢測到沒有下拉選單")
-                                            
+                                            tracking_info_new = f'{tracking_info} ({memo_date})'
+                                            # # 根據tracking_info選擇對應選項
+                                            delivery_keywords = ["包裹配達門市", "包裹已成功取件", "包裹已送達物流中心，進行理貨中", "等待配送中", "包裹配送中"]
+                                            preparation_keywords = ["廠商已準備出貨"]
+                                            force_majeure_keywords = ["持續未配送", "取件門市位於離島地區"]
+                                            return_keywords = ["包裹逾期未領，已送回物流中心", "包裹已送達物流中心，進行退貨處理中"]
+                                            oversize_keywords = ["包裹材積超過規範", "將退回廠商"]
+                                            store_issue_keywords = ["因門市因素無法配送，請與賣方客服聯繫重選取件門市", "請與賣方客服聯繫"]
                                             # 根據不同情況處理
                                             if has_dropdown:
                                                 with open(f'需要廠退日_暫不處理單.txt', 'a', encoding='utf-8') as f:
-                                                    f.write(f'工單號:{current_order_id} : 需要廠退日_暫不處理單,貨態:{tracking_info},貨態時間:{memo_date}\n')
+                                                    f.write(f'工單號:{current_order_id} : 需要廠退日_暫不處理單,貨態:{tracking_info_new}\n')
                                                 # # 點擊下拉選單
                                                 # dropdown.click()
                                                 # time.sleep(1)
                                                 # log_message(driver, "已點擊下拉選單")
-                                                # # 根據tracking_info選擇對應選項
-                                                # delivery_keywords = ["包裹配達門市", "包裹已成功取件", "包裹已送達物流中心，進行理貨中", "等待配送中", "包裹配送中"]
-                                                # preparation_keywords = ["廠商已準備出貨"]
-                                                # force_majeure_keywords = ["持續未配送", "取件門市位於離島地區"]
-                                                # return_keywords = ["包裹逾期未領，已送回物流中心", "包裹已送達物流中心，進行退貨處理中"]
-                                                # store_issue_keywords = ["因門市因素無法配送，請與賣方客服聯繫重選取件門市", "請與賣方客服聯繫"]
+                                                
                                                 
                                                 # # 設置默認回覆訊息
                                                 # reply_message = tracking_info
@@ -644,16 +645,23 @@ try:
                                                 memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
                                                     (By.CSS_SELECTOR, 'textarea[name="memo"]')
                                                 ))
-                                                preparation_keywords = ["廠商已準備出貨"]
+                                                # preparation_keywords = ["廠商已準備出貨"]
                                                 if any(keyword in tracking_info for keyword in preparation_keywords):
-                                                    tracking_info = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
+                                                    tracking_info_new = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
+                                                return_future_date = (memo_date + timedelta(days=5)).strftime("%m/%d")
+                                                if any(keyword in tracking_info for keyword in oversize_keywords):
+                                                        tracking_info_new = f"包裹材積超過規範，預計{return_future_date}退回清關行, 謝謝"
+                                                issue_future_date = (memo_date + timedelta(days=7)).strftime("%m/%d")
+                                                if any(keyword in tracking_info for keyword in store_issue_keywords):
+                                                    tracking_info_new = f"門市關轉，預計{issue_future_date}退回清關行, 謝謝"
+                                                
                                                 # 使用剪貼板貼上文字
-                                                pyperclip.copy(tracking_info)  # 將文字複製到剪貼板
+                                                pyperclip.copy(tracking_info_new)  # 將文字複製到剪貼板
                                                 actions = webdriver.ActionChains(driver)
                                                 actions.click(memo_textarea).perform()  # 點擊文本框
                                                 memo_textarea.clear()  # 清空文本框
                                                 actions.key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()  # 貼上
-                                                time.sleep(0.5)
+                                                time.sleep(1)
                                                 
                                                 # 點擊確定並提交按鈕
                                                 confirm_btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((
@@ -840,19 +848,12 @@ try:
         if len(order_links) > 0:
             print("等候處理新工單...")
             log_message(driver, "等候處理新工單...")
-            # 處理新的工單
-            for index, order_link in enumerate(order_links, 1):
-                # 這裡重用原本處理工單的代碼
-                current_order_id = None
-                try:
-                    current_order_id = order_link.text
-                    order_url = order_link.get_attribute('href')
-                    # ... 原本處理工單的代碼 ...
-                except Exception as e:
-                    print(f"處理工單時發生錯誤: {str(e)}")
-                    log_message(driver, f"處理工單時發生錯誤: {str(e)}")
-                    continue
-            time.sleep(600) 
+            # 重新從第一筆開始處理工單
+            driver.get(target_url)  # 回到工單列表頁面
+            wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
+            time.sleep(60)  # 等待動態內容載入
+           
         # 若是當下時間是18:00,切換到下班狀態
         else:
             print("目前沒有新工單，10分鐘後重新檢查...")

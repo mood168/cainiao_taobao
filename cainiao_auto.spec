@@ -26,7 +26,8 @@ a = Analysis(
         're',
         'os',
         'pyperclip',
-        'urllib3'
+        'urllib3',
+        'platformdirs'
     ],
     hookspath=[],
     hooksconfig={},
@@ -47,7 +48,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='菜鳥工單自動處理_v4',
+    name='菜鳥工單自動處理_v5',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
