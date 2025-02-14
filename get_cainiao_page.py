@@ -14,35 +14,320 @@ from datetime import datetime, timedelta
 import os
 import pyperclip
 from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import StaleElementReferenceException
 
 def show_notification(driver, message):
     """顯示瀏覽器通知"""
     try:
-        script = f"""
-        var notification = document.createElement('div');
-        notification.textContent = '{message}';
-        notification.style.position = 'fixed';
-        notification.style.top = '20px';
-        notification.style.right = '20px';
-        notification.style.backgroundColor = '#4CAF50';
-        notification.style.color = 'white';
-        notification.style.padding = '15px';
-        notification.style.borderRadius = '5px';
-        notification.style.zIndex = '9999';
-        notification.style.maxWidth = '300px';
-        notification.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
-        document.body.appendChild(notification);
-        setTimeout(function() {{
-            notification.style.transition = 'opacity 0.5s';
-            notification.style.opacity = '0';
-            setTimeout(function() {{
-                notification.remove();
-            }}, 500);
-        }}, 3000);
-        """
+        # 對消息進行轉義處理，避免 JavaScript 錯誤
+        escaped_message = message.replace("'", "\\'").replace("\n", "\\n")
+        script = """
+        (function() {
+            var notification = document.createElement('div');
+            notification.textContent = '%s';
+            notification.style.cssText = 'position: fixed; top: 20px; right: 20px; background-color: #4CAF50; color: white; padding: 15px; border-radius: 5px; z-index: 9999; max-width: 300px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); opacity: 1; transition: opacity 0.5s;';
+            document.body.appendChild(notification);
+            setTimeout(function() {
+                notification.style.opacity = '0';
+                setTimeout(function() {
+                    if (notification && notification.parentNode) {
+                        notification.parentNode.removeChild(notification);
+                    }
+                }, 500);
+            }, 3000);
+        })();
+        """ % escaped_message
         driver.execute_script(script)
     except Exception as e:
         print(f"顯示通知時發生錯誤: {str(e)}")
+        # 如果顯示通知失敗，至少確保消息被打印出來
+        print(f"通知內容: {message}")
+
+def process_current_page(driver, processed_orders, current_page):
+    wait = WebDriverWait(driver, 30)
+    original_window = driver.current_window_handle
+    
+    # 重新獲取當前頁面連結(解決頁面切換後元素失效問題)
+    current_page_links = retry_operation(
+        lambda: driver.find_elements(By.XPATH, "//table//a[string-length(text())=14 and translate(text(), '0123456789', '') = '']"),
+        max_retries=5,
+        delay=2
+    )
+    
+    if not current_page_links:
+        print(f"第 {current_page} 頁沒有找到工單連結")
+        return False
+
+    print(f"第 {current_page} 頁找到 {len(current_page_links)} 個工單")
+    log_message(driver, f"開始處理第 {current_page} 頁的 {len(current_page_links)} 個工單")
+
+    for index, order_link in enumerate(current_page_links, 1):
+        process_single_order(
+            driver=driver,
+            order_link=order_link,
+            processed_orders=processed_orders,
+            index=index,
+            total_orders=len(current_page_links),
+            page_number=current_page
+        )
+        
+        # 每次處理後重新獲取窗口控制權
+        driver.switch_to.window(original_window)
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
+        
+    return True
+
+def process_single_order(driver, order_link, processed_orders, index, total_orders, page_number):
+    wait = WebDriverWait(driver, 30)
+    original_window = driver.current_window_handle
+    current_order_id = None
+    
+    try:
+        # 驗證元素是否仍有效
+        order_link.is_enabled()  
+        current_order_id = order_link.text
+        order_url = order_link.get_attribute('href')
+    except StaleElementReferenceException:
+        print(f"第 {page_number} 頁的工單連結已失效，重新獲取...")
+        return
+    
+    try:
+        # 檢查是否已處理過
+        if current_order_id in processed_orders:
+            print(f"\n工單 {current_order_id} 已於 {processed_orders[current_order_id]['processed_time']} 處理過,跳過處理")
+            log_message(driver, f"\n工單 {current_order_id} 已於 {processed_orders[current_order_id]['processed_time']} 處理過,跳過處理")
+            return
+            
+        print(f"\n開始處理第 {page_number} 頁的第 {index}/{total_orders} 個工單: {current_order_id}")
+        log_message(driver, f"開始處理第 {page_number} 頁的第 {index}/{total_orders} 個工單: {current_order_id}")
+        
+        # 在開始處理前先保存到記錄中
+        save_processed_order(current_order_id, order_url)
+        
+        # 點擊工單連結並切換到新窗口
+        old_handles = driver.window_handles
+        driver.execute_script("arguments[0].click();", order_link)
+        
+        # 等待新窗口出現並切換
+        wait.until(lambda d: len(d.window_handles) > len(old_handles))
+        new_handle = [h for h in driver.window_handles if h not in old_handles][0]
+        driver.switch_to.window(new_handle)
+        
+        # 等待頁面加載
+        wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
+        time.sleep(5)
+        
+        # 確保在"工单基本信息"標籤頁
+        info_tab = wait.until(EC.presence_of_element_located(
+            (By.XPATH, "//div[@class='next-tabs-tab-inner' and contains(text(), '工单基本信息')]")
+        ))
+        parent_tab = info_tab.find_element(By.XPATH, "./..")
+        if 'active' not in parent_tab.get_attribute('class'):
+            info_tab.click()
+            time.sleep(2)
+        
+        # 等待內容區域加載
+        wait.until(EC.presence_of_element_located((By.CLASS_NAME, 'next-tabs-content')))
+        time.sleep(2)
+        
+        # 抓取工單信息
+        rows = wait.until(EC.presence_of_all_elements_located(
+            (By.CSS_SELECTOR, '.next-row')
+        ))
+        
+        # 處理工單信息
+        shipmentNo = None
+        with open(f'records/{current_order_id}.txt', 'w', encoding='utf-8') as f:
+            f.write(f'工单号: {current_order_id}\n')
+            for row in rows:
+                try:
+                    cols = row.find_elements(By.CSS_SELECTOR, '.next-col')
+                    for i in range(0, len(cols), 2):
+                        if i + 1 < len(cols):
+                            field_name = cols[i].text.strip()
+                            if '工单基本信息' in field_name:
+                                # 處理時間信息
+                                time_match = re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', field_name)
+                                if time_match:
+                                    f.write(f'创建时间: {time_match.group()}\n')
+                                # 處理運單號
+                                num_parts = field_name.split('运单号')
+                                if len(num_parts) > 1:
+                                    num_parts_txt = num_parts[1].strip()
+                                    shipmentNo = num_parts_txt[:8]
+                                    f.write(f'运单号: {shipmentNo}\n')
+                                # 處理工單描述
+                                description_parts = field_name.split('工单描述')
+                                if len(description_parts) > 1:
+                                    f.write(f'\n\n工单描述: {description_parts[1]}\n')
+                except Exception as e:
+                    print(f"處理行數據時發生錯誤: {str(e)}")
+                    continue
+        
+        if shipmentNo:
+            # 獲取 API token 並處理貨態
+            token = get_api_token()
+            if token:
+                process_shipment_status(driver, token, shipmentNo, current_order_id)
+        
+        # 關閉當前窗口並切換回原始窗口
+        driver.close()
+        driver.switch_to.window(original_window)
+        print(f"已完成工單 {current_order_id} 的處理")
+        
+    except Exception as e:
+        print(f"處理工單 {current_order_id} 時發生錯誤: {str(e)}")
+        log_message(driver, f"處理工單 {current_order_id} 時發生錯誤: {str(e)}")
+        # 確保返回原始窗口
+        if driver.current_window_handle != original_window:
+            try:
+                driver.close()
+                driver.switch_to.window(original_window)
+            except Exception as close_error:
+                print(f"關閉錯誤窗口時發生異常: {str(close_error)}")
+    finally:
+        time.sleep(2)
+
+def get_api_token():
+    token_url = "https://ecapi.sp88.tw/api/Token"
+    token_headers = {
+        "Content-Type": "application/json",
+    }
+    token_data = {
+        "account": "ESCS",
+        "password": "SDG3jdkd59@1"
+    }
+    try:
+        token_response = requests.post(token_url, headers=token_headers, data=json.dumps(token_data), timeout=30)
+        if token_response.status_code == 200:
+            token_data = token_response.json()
+            if token_data.get("token"):
+                return token_data.get("token")
+    except Exception as e:
+        print(f"獲取 API token 時發生錯誤: {str(e)}")
+    return None
+
+def process_shipment_status(driver, token, shipmentNo, current_order_id):
+    track_url = f"https://ecapi.sp88.tw/api/track/B2C?eshopId=74A&shipmentNo={shipmentNo}"
+    track_headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}"
+    }
+    
+    try:
+        track_response = requests.get(track_url, headers=track_headers)
+        if track_response.status_code == 200:
+            track_data = track_response.json()
+            if track_data.get("status"):
+                tracking_info = track_data.get("status")
+                process_tracking_result(driver, track_data, current_order_id, tracking_info)
+    except Exception as e:
+        print(f"處理貨態時發生錯誤: {str(e)}")
+        log_message(driver, f"處理貨態時發生錯誤: {str(e)}")
+
+def process_tracking_result(driver, track_data, current_order_id, tracking_info):
+    try:
+        # 處理日期
+        date_str = track_data.get("date")
+        try:
+            if "T" in date_str:
+                memo_date = datetime.strptime(date_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
+            else:
+                memo_date = datetime.strptime(date_str, "%Y%m%d%H%M%S")
+        except:
+            memo_date = datetime.now()
+        
+        # 更新追蹤信息
+        tracking_info_new = f'{tracking_info} ({memo_date})'
+        errorCode = track_data.get("errorCode")
+        
+        # 寫入追蹤信息
+        with open(f'records/{current_order_id}.txt', 'a', encoding='utf-8') as f:
+            f.write(f'\n\n貨態查詢結果: {tracking_info_new}\n')
+        
+        # 處理結單操作
+        if errorCode == 0:
+            handle_order_completion(driver, tracking_info, memo_date, current_order_id)
+            
+    except Exception as e:
+        print(f"處理追蹤結果時發生錯誤: {str(e)}")
+        log_message(driver, f"處理追蹤結果時發生錯誤: {str(e)}")
+
+def handle_order_completion(driver, tracking_info, memo_date, current_order_id):
+    try:
+        # 點擊結單按鈕
+        finish_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
+            (By.XPATH, "//span[contains(@class, 'next-btn-helper') and contains(text(), '结单')]")
+        ))
+        driver.execute_script("arguments[0].click();", finish_btn)
+        time.sleep(2)
+        
+        # 檢查是否有下拉選單
+        has_dropdown = False
+        try:
+            dropdown = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
+                (By.CSS_SELECTOR, 'span.structFinish-select-trigger')
+            ))
+            has_dropdown = True
+        except:
+            pass
+        
+        if has_dropdown:
+            # 處理有下拉選單的情況
+            with open(f'需要廠退日_暫不處理單.txt', 'a', encoding='utf-8') as f:
+                f.write(f'工單號:{current_order_id} : 需要廠退日_暫不處理單,貨態:{tracking_info}\n')
+        else:
+            # 處理沒有下拉選單的情況
+            handle_no_dropdown_case(driver, tracking_info, memo_date)
+            
+    except Exception as e:
+        print(f"處理結單時發生錯誤: {str(e)}")
+        with open(f'投訴單_請人工處理.txt', 'a', encoding='utf-8') as f:
+            f.write(f'工單號:{current_order_id} : 投訴單_請人工處理,貨態:{tracking_info}\n')
+
+def handle_no_dropdown_case(driver, tracking_info, memo_date):
+    # 關鍵字定義
+    preparation_keywords = ["廠商已準備出貨"]
+    oversize_keywords = ["包裹材積超過規範", "將退回廠商"]
+    store_issue_keywords = ["因門市因素無法配送，請與賣方客服聯繫重選取件門市", "請與賣方客服聯繫"]
+    
+    # 根據不同情況設置回覆訊息
+    if any(keyword in tracking_info for keyword in preparation_keywords):
+        tracking_info_new = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
+    elif any(keyword in tracking_info for keyword in oversize_keywords):
+        return_future_date = (memo_date + timedelta(days=5)).strftime("%m/%d")
+        tracking_info_new = f"包裹材積超過規範，預計{return_future_date}退回清關行, 謝謝"
+    elif any(keyword in tracking_info for keyword in store_issue_keywords):
+        issue_future_date = (memo_date + timedelta(days=7)).strftime("%m/%d")
+        tracking_info_new = f"門市關轉，預計{issue_future_date}退回清關行, 謝謝"
+    else:
+        tracking_info_new = tracking_info
+    
+    # 填寫回覆
+    memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
+        (By.CSS_SELECTOR, 'textarea[name="memo"]')
+    ))
+    actions = webdriver.ActionChains(driver)
+    actions.click(memo_textarea).perform()
+    pyperclip.copy(tracking_info_new)
+    actions.key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()
+    time.sleep(1)
+    
+    # 提交
+    submit_btn = WebDriverWait(driver, 2).until(
+        EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), '确定并提交')]"))
+    )
+    driver.execute_script("arguments[0].click();", submit_btn)
+    time.sleep(2)
+    
+    # 等待對話框消失
+    try:
+        WebDriverWait(driver, 10).until_not(
+            EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'next-dialog-wrapper')]"))
+        )
+        time.sleep(2)
+    except Exception as e:
+        print(f"等待對話框消失時發生錯誤: {str(e)}")
 
 def log_message(driver, message):
     """同時執行 print 和瀏覽器通知"""
@@ -74,6 +359,7 @@ try:
         options=chrome_options
     )
     wait = WebDriverWait(driver, 30)  # 增加默認等待時間
+    original_window = driver.current_window_handle
     print("瀏覽器已啟動")
     log_message(driver, "瀏覽器已啟動")
     
@@ -170,82 +456,7 @@ try:
 
     retry_operation(navigate_to_task_page, max_retries=3, delay=5)
     
-    print("檢查工作狀態...")
-    log_message(driver, "檢查工作狀態...")
-
-    def check_and_switch_status():
-        # 等待狀態按鈕出現
-        status_button = wait.until(EC.presence_of_element_located(
-            (By.CSS_SELECTOR, 'span.Status--statusTrigger--1En5pHk')
-        ))
         
-        # 檢查狀態文字
-        status_text = status_button.text.strip()
-        print(f"當前狀態: {status_text}")
-        log_message(driver, f"當前狀態: {status_text}")
-        if status_text == "下班":
-            print("檢測到下班狀態,準備切換到上班...")
-            log_message(driver, "檢測到下班狀態,準備切換到上班...")
-            # 移動滑鼠到狀態按鈕
-            actions = webdriver.ActionChains(driver)
-            actions.move_to_element(status_button).perform()
-            print("已移動滑鼠到狀態按鈕")
-            log_message(driver, "已移動滑鼠到狀態按鈕")
-            # 等待彈出選單出現
-            wait.until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, 'div.coneProtal-overlay-wrapper.opened')
-            ))
-            print("狀態選單已出現")
-            log_message(driver, "狀態選單已出現")
-            try:
-                # 嘗試方法1: 通過 Status--statusItem--3UvMvXq 類別定位
-                online_option = wait.until(EC.element_to_be_clickable((
-                    By.XPATH, 
-                    "//span[contains(@class, 'Status--statusItem--3UvMvXq') and contains(text(), '上班')]"
-                )))
-            except:
-                try:
-                    # 嘗試方法2: 通過父元素定位
-                    online_option = wait.until(EC.element_to_be_clickable((
-                        By.XPATH,
-                        "//div[contains(@class, 'coneProtal-overlay-wrapper')]//span[contains(text(), '上班')]"
-                    )))
-                except:
-                    # 嘗試方法3: 最寬鬆的定位方式
-                    online_option = wait.until(EC.element_to_be_clickable((
-                        By.XPATH,
-                        "//*[contains(text(), '上班')]"
-                    )))
-            
-            # 使用 JavaScript 點擊,避免可能的覆蓋問題
-            driver.execute_script("arguments[0].click();", online_option)
-            print("已點擊上班選項")
-            log_message(driver, "已點擊上班選項")
-            # 等待狀態更新
-            time.sleep(2)  # 等待狀態切換
-            
-            # 等待列表重新載入
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
-            time.sleep(2)  # 額外等待確保列表完全載入
-            
-            # 驗證狀態是否已更新
-            new_status = wait.until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, 'span.Status--statusTrigger--1En5pHk')
-            )).text.strip()
-            
-            if new_status == "上班":
-                print("已成功切換到上班狀態")
-                log_message(driver, "已成功切換到上班狀態")
-            else:
-                log_message(driver, f"狀態切換失敗,當前狀態: {new_status}")
-                raise Exception(f"狀態切換失敗,當前狀態: {new_status}")
-        else:
-            log_message(driver, "當前已是上班狀態,無需切換")
-            print("當前已是上班狀態,無需切換")
-    
-    # 重試切換狀態操作
-    retry_operation(check_and_switch_status, max_retries=3, delay=2)
-    
     # 確保列表已完全載入
     wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
     time.sleep(3)  # 額外等待確保列表穩定
@@ -256,35 +467,65 @@ try:
         # 等待表格完全加載
         wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
         
-        # 使用多種定位策略
-        order_links = None
-        try:
-            # 方法1: 使用XPath精確匹配14位數字
-            order_links = driver.find_elements(By.XPATH, "//table//a[string-length(text())=14 and translate(text(), '0123456789', '') = '']")
-        except:
-            try:
-                # 方法2: 使用CSS選擇器
-                order_links = driver.find_elements(By.CSS_SELECTOR, "table tbody tr td:first-child a")
-            except:
-                # 方法3: 使用更寬鬆的XPath
-                order_links = driver.find_elements(By.XPATH, "//*[contains(@class, 'ticket-number') or contains(@class, 'order-number')]")
+        all_order_links = []  # 存儲所有頁面的工單連結
         
-        if not order_links:
-            log_message(driver, "找不到工單號連結")
-            raise Exception("找不到工單號連結")
+        while True:
+            # 使用多種定位策略獲取當前頁面的工單連結
+            current_page_links = None
+            try:
+                # 方法1: 使用XPath精確匹配14位數字
+                current_page_links = driver.find_elements(By.XPATH, "//table//a[string-length(text())=14 and translate(text(), '0123456789', '') = '']")
+            except:
+                try:
+                    # 方法2: 使用CSS選擇器
+                    current_page_links = driver.find_elements(By.CSS_SELECTOR, "table tbody tr td:first-child a")
+                except:
+                    # 方法3: 使用更寬鬆的XPath
+                    current_page_links = driver.find_elements(By.XPATH, "//*[contains(@class, 'ticket-number') or contains(@class, 'order-number')]")
+            
+            if not current_page_links:
+                if not all_order_links:  # 如果是第一頁就沒有連結,則報錯
+                    log_message(driver, "找不到工單號連結")
+                    raise Exception("找不到工單號連結")
+                break  # 如果不是第一頁,則表示已經處理完所有頁面
+            
+            # 將當前頁面的連結添加到總列表中
+            all_order_links.extend(current_page_links)
+            
+            # 尋找下一頁按鈕
+            try:
+                # 找到當前頁碼
+                current_page = driver.find_element(By.XPATH, "//button[contains(@class, 'next-pagination-item next-current')]//span").text
+                next_page = str(int(current_page) + 1)
+                
+                # 尋找下一頁按鈕
+                next_page_btn = driver.find_element(By.XPATH, f"//button[contains(@class, 'next-pagination-item')]//span[text()='{next_page}']")
+                
+                # 點擊下一頁
+                driver.execute_script("arguments[0].click();", next_page_btn)
+                print(f"正在切換到第 {next_page} 頁...")
+                log_message(driver, f"正在切換到第 {next_page} 頁...")
+                
+                # 等待新頁面加載
+                time.sleep(3)
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
+            except:
+                print("已經是最後一頁或切換頁面失敗")
+                break
+        
         # 移除重複的工單連結
         unique_order_links = []
         seen_order_ids = set()
         
-        for link in order_links:
+        for link in all_order_links:
             order_id = link.text.strip()
             if order_id not in seen_order_ids:
                 seen_order_ids.add(order_id)
                 unique_order_links.append(link)
         
         order_links = unique_order_links
-        print(f"找到 {len(order_links)} 個工單號連結")
-        log_message(driver, f"找到 {len(order_links)} 個工單號連結")
+        print(f"總共找到 {len(order_links)} 個工單號連結")
+        log_message(driver, f"總共找到 {len(order_links)} 個工單號連結")
         return order_links
 
     def load_processed_orders():
@@ -449,7 +690,7 @@ try:
 
                             except Exception as e:
                                 print(f"處理行數據時發生錯誤: {str(e)}")
-                                continue            
+                                continue
                     # 獲取 API token
                     try:
                         token_url = "https://ecapi.sp88.tw/api/Token"
@@ -539,26 +780,18 @@ try:
                                             f.write(f'\n結果: {errorCodeDescription.replace('"', '')}\n')
                                     
                                     # 點擊結單按鈕
-                                    if errorCode == 0:  # 只有在 errorCode = 0 時才執行結單操作
+                                    # 只有在 errorCode = 0 時才執行結單操作
+                                    if errorCode == 0:
                                         try:
                                             print("準備點擊結單按鈕...")
                                             # 使用更短的等待時間尋找結單按鈕
-                                            try:
-                                                finish_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
-                                                    (By.XPATH, "//span[contains(@class, 'next-btn-helper') and contains(text(), '结单')]")
-                                                ))
-                                                driver.execute_script("arguments[0].click();", finish_btn)
-                                                print("已點擊結單按鈕")
-                                            except:
-                                                print("找不到結單按鈕，嘗試使用留言按鈕...")
-                                                log_message(driver, "找不到結單按鈕，嘗試使用留言按鈕...")
-                                                # 尋找並點擊留言按鈕
-                                                message_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
-                                                    (By.XPATH, "//button[contains(@class, 'next-btn next-small next-btn-normal ticket-detail-buttons-item')]//span[contains(text(), '留言')]")
-                                                ))
-                                                driver.execute_script("arguments[0].click();", message_btn)
-                                                print("已點擊留言按鈕")
-                                                
+                                            
+                                            finish_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
+                                                (By.XPATH, "//span[contains(@class, 'next-btn-helper') and contains(text(), '结单')]")
+                                            ))
+                                            driver.execute_script("arguments[0].click();", finish_btn)
+                                            print("已點擊結單按鈕")
+
                                             # 等待結單對話框出現
                                             time.sleep(2)  # 等待對話框完全顯示
                                             # 檢查是否有下拉選單
@@ -655,30 +888,45 @@ try:
                                                 if any(keyword in tracking_info for keyword in store_issue_keywords):
                                                     tracking_info_new = f"門市關轉，預計{issue_future_date}退回清關行, 謝謝"
                                                 
+                                                
+                                                # 檢查是否為結單對話框或留言對話框
+                                            
                                                 # 使用剪貼板貼上文字
                                                 pyperclip.copy(tracking_info_new)  # 將文字複製到剪貼板
                                                 actions = webdriver.ActionChains(driver)
                                                 actions.click(memo_textarea).perform()  # 點擊文本框
-                                                memo_textarea.clear()  # 清空文本框
+                                                # 清空文本框
                                                 actions.key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()  # 貼上
                                                 time.sleep(1)
+                                                finish_btn = driver.find_element(By.XPATH, "//span[contains(@class, 'cDeskStructFunctionComponent-btn-helper') and contains(text(), '确定并提交')]")
+                                                submit_btn_text = "确定并提交"                                               
                                                 
-                                                # 點擊確定並提交按鈕
-                                                confirm_btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((
-                                                    By.XPATH, "//span[contains(@class, 'cDeskStructFunctionComponent-btn-helper') and contains(text(), '确定并提交')]"
-                                                )))
-                                                        
-                                                # 點擊確認按鈕
-                                                driver.execute_script("arguments[0].click();", confirm_btn)
-                                                print("已點擊確認按鈕")
-                                                # log_message(driver, "已點擊確認按鈕")
-                                                # 等待結單對話框消失
+                                                
+                                                submit_btn = WebDriverWait(driver, 2).until(
+                                                    EC.element_to_be_clickable((By.XPATH, f"//span[contains(text(), '{submit_btn_text}')]"))
+                                                )
+                                                driver.execute_script("arguments[0].click();", submit_btn)
                                                 time.sleep(2)
-                                                print("結單完成")
-                                                log_message(driver, "結單完成")
+                                                print(f"已點擊{submit_btn_text}按鈕")
+                                                
+                                                # 等待結單對話框消失
+                                                try:
+                                                    WebDriverWait(driver, 10).until_not(
+                                                        EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'next-dialog-wrapper')]"))
+                                                    )
+                                                    time.sleep(2)
+                                                    print("對話框已消失")
+                                                    # log_message(driver, "對話框已消失")
+                                                except Exception as e:
+                                                    print(f"等待對話框消失時發生錯誤: {str(e)}")
+                                                    log_message(driver, f"等待對話框消失時發生錯誤: {str(e)}")
+                                                time.sleep(2)
+                                                
                                         except Exception as e:
-                                            print(f"找不到結單按鈕或結單時發生錯誤: {str(e)}")
-                                            log_message(driver, f"找不到結單按鈕或結單時發生錯誤: {str(e)},關閉視窗並繼續下一筆...")
+                                            with open(f'投訴單_請人工處理.txt', 'a', encoding='utf-8') as f:
+                                                f.write(f'工單號:{current_order_id} : 投訴單_請人工處理,貨態:{tracking_info_new}\n')
+                                            print(f"此為投訴單或此頁面無結單按鈕: {str(e)}")
+                                            log_message(driver, f"此為投訴單或此頁面無結單按鈕: {str(e)},關閉視窗並繼續下一筆...")
                                             print("關閉視窗並繼續下一筆...")
                                             time.sleep(2)
                                             # 關閉當前視窗並切換回原始視窗
@@ -692,8 +940,8 @@ try:
                                                 log_message(driver, f"關閉視窗時發生錯誤: {str(close_error)}")
                                             continue
                                     else:
-                                        print(f"errorCode 不為 0 (當前值: {errorCode}), 跳過結單操作")
-                                        log_message(driver, f"errorCode 不為 0 (當前值: {errorCode}), 跳過結單操作")
+                                        print(f"貨態查詢失敗 (errorCode: {errorCode}), 跳過結單操作")
+                                        log_message(driver, f"貨態查詢失敗 (errorCode: {errorCode}), 跳過結單操作")
                                         with open(f'貨態查詢失敗_無法處理單.txt', 'a', encoding='utf-8') as f:
                                             f.write(f'工單號:{current_order_id} : 錯誤描述: {errorCodeDescription}\n')
                                         # 關閉當前視窗並切換回原始視窗
@@ -754,74 +1002,9 @@ try:
     print("\n所有工單處理完成!")
     log_message(driver, "\n所有工單處理完成!")
 
-    def switch_to_offline():
-        try:
-            print("\n準備切換到下班狀態...")
-            log_message(driver, "\n準備切換到下班狀態...")
-            # 等待狀態按鈕出現
-            status_button = wait.until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, 'span.Status--statusTrigger--1En5pHk')
-            ))
-            
-            # 移動滑鼠到狀態按鈕
-            actions = webdriver.ActionChains(driver)
-            actions.move_to_element(status_button).perform()
-            print("已移動滑鼠到狀態按鈕")
-            
-            # 等待彈出選單出現
-            wait.until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, 'div.coneProtal-overlay-wrapper.opened')
-            ))
-            print("狀態選單已出現")
-            
-            try:
-                # 嘗試方法1: 通過 Status--statusItem--3UvMvXq 類別定位
-                offline_option = wait.until(EC.element_to_be_clickable((
-                    By.XPATH, 
-                    "//span[contains(@class, 'Status--statusItem--3UvMvXq') and contains(text(), '下班')]"
-                )))
-            except:
-                try:
-                    # 嘗試方法2: 通過父元素定位
-                    offline_option = wait.until(EC.element_to_be_clickable((
-                        By.XPATH,
-                        "//div[contains(@class, 'coneProtal-overlay-wrapper')]//span[contains(text(), '下班')]"
-                    )))
-                except:
-                    # 嘗試方法3: 最寬鬆的定位方式
-                    offline_option = wait.until(EC.element_to_be_clickable((
-                        By.XPATH,
-                        "//*[contains(text(), '下班')]"
-                    )))
-            
-            # 使用 JavaScript 點擊,避免可能的覆蓋問題
-            driver.execute_script("arguments[0].click();", offline_option)
-            print("已點擊下班選項")
-            log_message(driver, "已點擊下班選項")
-            # 等待狀態更新
-            time.sleep(2)  # 等待狀態切換
-            
-            # 驗證狀態是否已更新
-            new_status = wait.until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, 'span.Status--statusTrigger--1En5pHk')
-            )).text.strip()
-            
-            if new_status == "下班":
-                print("已成功切換到下班狀態")
-                log_message(driver, "已成功切換到下班狀態")
-            else:
-                log_message(driver, f"狀態切換失敗,當前狀態: {new_status}")
-                raise Exception(f"狀態切換失敗,當前狀態: {new_status}")
-                
-        except Exception as e:
-            print(f"切換到下班狀態時發生錯誤: {str(e)}")
-            log_message(driver, f"切換到下班狀態時發生錯誤: {str(e)}")
-            raise
-
     def reload_and_check():
         try:
             print("\n重新載入頁面...")
-            log_message(driver, "\n重新載入頁面...")
             driver.refresh()
             # 等待頁面加載完成
             wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
@@ -832,55 +1015,85 @@ try:
             # 重新獲取工單連結
             order_links = retry_operation(find_order_links, max_retries=10, delay=3)
             total_orders = len(order_links)
-            print(f"檢查到 {total_orders} 個工單")
-            log_message(driver, f"檢查到 {total_orders} 個工單")
+            if total_orders > 0:
+                print(f"檢查到 {total_orders} 個新工單")
             return total_orders, order_links
             
         except Exception as e:
             print(f"重新載入頁面時發生錯誤: {str(e)}")
-            log_message(driver, f"重新載入頁面時發生錯誤: {str(e)}")
             return 0, []
 
+    # 主循環：持續檢查和處理工單
     while True:
-        
-        order_links = reload_and_check()
-        
-        if len(order_links) > 0:
-            print("等候處理新工單...")
-            log_message(driver, "等候處理新工單...")
-            # 重新從第一筆開始處理工單
-            driver.get(target_url)  # 回到工單列表頁面
+        try:
+            print("開始檢查工單...")
+            log_message(driver, "開始檢查工單...")
+            
+            # 重新載入頁面
+            driver.get(target_url)
             wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
             wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
-            time.sleep(60)  # 等待動態內容載入
-           
-        # 若是當下時間是18:00,切換到下班狀態
-        else:
-            print("目前沒有新工單，10分鐘後重新檢查...")
-            log_message(driver, "目前沒有新工單，10分鐘後重新檢查...")
-            time.sleep(600)  # 等待10分鐘
+            time.sleep(5)  # 等待動態內容載入
             
-            # 檢查當前時間是否為18:00
-            if datetime.now().hour == 18:
-                print("已到達下班時間（18:00）")
-                log_message(driver, "已到達下班時間（18:00）")
-                retry_operation(switch_to_offline, max_retries=3, delay=2)
-                break  # 跳出循環，結束程式
-
-    # 若是當下時間是18:00,切換到下班狀態
-    if datetime.now().hour == 18:
-        retry_operation(switch_to_offline, max_retries=3, delay=2)
-    
-    # 等待2秒
-    # time.sleep(2)
-    # print("準備關閉瀏覽器...")
-    
-    # 關閉瀏覽器
-    # driver.quit()
-    # print("瀏覽器已關閉")
+            has_next_page = True
+            current_page = 1
+            
+            while has_next_page:
+                print(f"\n正在處理第 {current_page} 頁的工單...")
+                log_message(driver, f"\n正在處理第 {current_page} 頁的工單...")
+                
+                # 強制重新獲取頁面元素
+                driver.execute_script("location.reload(true);")  # 強制硬刷新
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
+                time.sleep(5)
+                
+                # 使用新版處理函式
+                page_has_content = process_current_page(driver, processed_orders, current_page)
+                
+                if not page_has_content:
+                    has_next_page = False
+                    break
+                
+                # 切換頁面前確認所有窗口已關閉
+                if len(driver.window_handles) > 1:
+                    for handle in driver.window_handles[1:]:
+                        driver.switch_to.window(handle)
+                        driver.close()
+                    driver.switch_to.window(original_window)
+                
+                # 頁面切換邏輯加強(約1040-1054行)
+                try:
+                    next_page = current_page + 1
+                    next_page_btn = WebDriverWait(driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, f"//button[contains(@class, 'next-pagination-item')]//span[text()='{next_page}']"))
+                    )
+                    driver.execute_script("arguments[0].scrollIntoView(true);", next_page_btn)
+                    driver.execute_script("arguments[0].click();", next_page_btn)
+                    
+                    # 新增頁面切換驗證
+                    WebDriverWait(driver, 15).until(
+                        lambda d: d.find_element(By.XPATH, f"//li[@title='{next_page}']").get_attribute("class") == "next-pagination-item next-active"
+                    )
+                    current_page = next_page
+                    time.sleep(5)
+                except Exception as e:
+                    print(f"頁面切換失敗: {str(e)}，可能已是最後一頁")
+                    has_next_page = False
+            
+            print("\n所有頁面的工單處理完成,等待5分鐘後重新檢查...")
+            log_message(driver, "\n所有頁面的工單處理完成,等待5分鐘後重新檢查...")
+            time.sleep(300)
+            
+        except Exception as e:
+            print(f"檢查工單時發生錯誤: {str(e)}")
+            log_message(driver, f"檢查工單時發生錯誤: {str(e)}")
+            print("等待5分鐘後重試...")
+            log_message(driver, "等待5分鐘後重試...")
+            time.sleep(300)
+            continue
     
 except KeyboardInterrupt:
-    print("\n檢測到Ctrl+C,正在優雅退出...")
+    print("\n檢測到Ctrl+C，正在退出程式...")
 except Exception as e:
     print(f"發生錯誤: {e}")
     print("錯誤詳情:")

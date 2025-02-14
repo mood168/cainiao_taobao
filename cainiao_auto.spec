@@ -48,7 +48,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='菜鳥工單自動處理_v5',
+    name='菜鳥工單自動處理_v7',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -61,5 +61,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='NONE'
 ) 
