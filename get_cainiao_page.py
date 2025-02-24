@@ -164,12 +164,7 @@ def process_single_order(driver, order_link, processed_orders, index, total_orde
                     print(f"處理行數據時發生錯誤: {str(e)}")
                     continue
         
-        if shipmentNo:
-            # 獲取 API token 並處理貨態
-            token = get_api_token()
-            if token:
-                process_shipment_status(driver, token, shipmentNo, current_order_id)
-        
+       
         # 關閉當前窗口並切換回原始窗口
         driver.close()
         driver.switch_to.window(original_window)
@@ -187,147 +182,6 @@ def process_single_order(driver, order_link, processed_orders, index, total_orde
                 print(f"關閉錯誤窗口時發生異常: {str(close_error)}")
     finally:
         time.sleep(2)
-
-def get_api_token():
-    token_url = "https://ecapi.sp88.tw/api/Token"
-    token_headers = {
-        "Content-Type": "application/json",
-    }
-    token_data = {
-        "account": "ESCS",
-        "password": "SDG3jdkd59@1"
-    }
-    try:
-        token_response = requests.post(token_url, headers=token_headers, data=json.dumps(token_data), timeout=30)
-        if token_response.status_code == 200:
-            token_data = token_response.json()
-            if token_data.get("token"):
-                return token_data.get("token")
-    except Exception as e:
-        print(f"獲取 API token 時發生錯誤: {str(e)}")
-    return None
-
-def process_shipment_status(driver, token, shipmentNo, current_order_id):
-    track_url = f"https://ecapi.sp88.tw/api/track/B2C?eshopId=74A&shipmentNo={shipmentNo}"
-    track_headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}"
-    }
-    
-    try:
-        track_response = requests.get(track_url, headers=track_headers)
-        if track_response.status_code == 200:
-            track_data = track_response.json()
-            if track_data.get("status"):
-                tracking_info = track_data.get("status")
-                process_tracking_result(driver, track_data, current_order_id, tracking_info)
-    except Exception as e:
-        print(f"處理貨態時發生錯誤: {str(e)}")
-        log_message(driver, f"處理貨態時發生錯誤: {str(e)}")
-
-def process_tracking_result(driver, track_data, current_order_id, tracking_info):
-    try:
-        # 處理日期
-        date_str = track_data.get("date")
-        try:
-            if "T" in date_str:
-                memo_date = datetime.strptime(date_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
-            else:
-                memo_date = datetime.strptime(date_str, "%Y%m%d%H%M%S")
-        except:
-            memo_date = datetime.now()
-        
-        # 更新追蹤信息
-        tracking_info_new = f'{tracking_info} ({memo_date})'
-        errorCode = track_data.get("errorCode")
-        
-        # 寫入追蹤信息
-        with open(f'records/{current_order_id}.txt', 'a', encoding='utf-8') as f:
-            f.write(f'\n\n貨態查詢結果: {tracking_info_new}\n')
-        
-        # 處理結單操作
-        if errorCode == 0:
-            handle_order_completion(driver, tracking_info, memo_date, current_order_id)
-            
-    except Exception as e:
-        print(f"處理追蹤結果時發生錯誤: {str(e)}")
-        log_message(driver, f"處理追蹤結果時發生錯誤: {str(e)}")
-
-def handle_order_completion(driver, tracking_info, memo_date, current_order_id):
-    try:
-        # 點擊結單按鈕
-        finish_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
-            (By.XPATH, "//span[contains(@class, 'next-btn-helper') and contains(text(), '结单')]")
-        ))
-        driver.execute_script("arguments[0].click();", finish_btn)
-        time.sleep(2)
-        
-        # 檢查是否有下拉選單
-        has_dropdown = False
-        try:
-            dropdown = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
-                (By.CSS_SELECTOR, 'span.structFinish-select-trigger')
-            ))
-            has_dropdown = True
-        except:
-            pass
-        
-        if has_dropdown:
-            # 處理有下拉選單的情況
-            with open(f'需要廠退日_暫不處理單.txt', 'a', encoding='utf-8') as f:
-                f.write(f'工單號:{current_order_id} : 需要廠退日_暫不處理單,貨態:{tracking_info}\n')
-        else:
-            # 處理沒有下拉選單的情況
-            handle_no_dropdown_case(driver, tracking_info, memo_date)
-            
-    except Exception as e:
-        print(f"處理結單時發生錯誤: {str(e)}")
-        with open(f'投訴單_請人工處理.txt', 'a', encoding='utf-8') as f:
-            f.write(f'工單號:{current_order_id} : 投訴單_請人工處理,貨態:{tracking_info}\n')
-
-def handle_no_dropdown_case(driver, tracking_info, memo_date):
-    # 關鍵字定義
-    preparation_keywords = ["廠商已準備出貨"]
-    oversize_keywords = ["包裹材積超過規範", "將退回廠商"]
-    store_issue_keywords = ["因門市因素無法配送，請與賣方客服聯繫重選取件門市", "請與賣方客服聯繫"]
-    
-    # 根據不同情況設置回覆訊息
-    if any(keyword in tracking_info for keyword in preparation_keywords):
-        tracking_info_new = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
-    elif any(keyword in tracking_info for keyword in oversize_keywords):
-        return_future_date = (memo_date + timedelta(days=5)).strftime("%m/%d")
-        tracking_info_new = f"包裹材積超過規範，預計{return_future_date}退回清關行, 謝謝"
-    elif any(keyword in tracking_info for keyword in store_issue_keywords):
-        issue_future_date = (memo_date + timedelta(days=7)).strftime("%m/%d")
-        tracking_info_new = f"門市關轉，預計{issue_future_date}退回清關行, 謝謝"
-    else:
-        tracking_info_new = tracking_info
-    
-    # 填寫回覆
-    memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
-        (By.CSS_SELECTOR, 'textarea[name="memo"]')
-    ))
-    actions = webdriver.ActionChains(driver)
-    actions.click(memo_textarea).perform()
-    pyperclip.copy(tracking_info_new)
-    actions.key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()
-    time.sleep(1)
-    
-    # 提交
-    submit_btn = WebDriverWait(driver, 2).until(
-        EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), '确定并提交')]"))
-    )
-    driver.execute_script("arguments[0].click();", submit_btn)
-    time.sleep(2)
-    
-    # 等待對話框消失
-    try:
-        WebDriverWait(driver, 10).until_not(
-            EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'next-dialog-wrapper')]"))
-        )
-        time.sleep(2)
-    except Exception as e:
-        print(f"等待對話框消失時發生錯誤: {str(e)}")
 
 def log_message(driver, message):
     """同時執行 print 和瀏覽器通知"""
@@ -752,183 +606,557 @@ try:
                             if track_response.status_code == 200:
                                 track_data = track_response.json()
                                 if track_data.get("status") != None:
-                                    tracking_info = track_data.get("status")
-                                    log_message(driver, f'貨態: {tracking_info}')
-                                    # 修改日期格式處理
-                                    date_str = track_data.get("date")
-                                    try:
-                                        if "T" in date_str:
-                                            # 處理包含 'T' 的ISO格式
-                                            memo_date = datetime.strptime(date_str.split('.')[0], "%Y-%m-%dT%H:%M:%S")
-                                        else:
-                                            # 處理標準格式
-                                            memo_date = datetime.strptime(date_str, "%Y%m%d%H%M%S")
-                                    except Exception as e:
-                                        print(f"日期格式轉換錯誤: {str(e)}")
-                                        memo_date = datetime.now()
-                                    
-                                    errorCodeDescription = track_data.get("errorCodeDescription")
+                                    eshopsonId = track_data.get("eshopsonId")
                                     errorCode = track_data.get("errorCode")
-                                    # 將追蹤信息寫入文件
-                                    # log_message(driver, f'(自動寫入)新留言')
-                                    with open(f'records/{current_order_id}.txt', 'a', encoding='utf-8') as f:
-                                        f.write(f'(自動寫入)新留言: {tracking_info}\n{memo_date}')
-                                        f.write(f'\n\n貨態查詢:')
-                                        if errorCode == 0:
-                                            f.write(f'\n結果: {track_response.text.replace('"', '').replace('\n', '')}\n')
-                                        else:
-                                            f.write(f'\n結果: {errorCodeDescription.replace('"', '')}\n')
-                                    
-                                    # 點擊結單按鈕
                                     # 只有在 errorCode = 0 時才執行結單操作
                                     if errorCode == 0:
-                                        try:
-                                            print("準備點擊結單按鈕...")
-                                            # 使用更短的等待時間尋找結單按鈕
-                                            
-                                            finish_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
-                                                (By.XPATH, "//span[contains(@class, 'next-btn-helper') and contains(text(), '结单')]")
-                                            ))
-                                            driver.execute_script("arguments[0].click();", finish_btn)
-                                            print("已點擊結單按鈕")
+                                        # 使用獲取的 token 調用追蹤 API
+                                        track_NPPS_url = f"https://ecapi.sp88.tw/api/Npps/Status"  # 修正字符串插值語法
+                                        track_NPPS_headers = {
+                                            "Content-Type": "application/json", 
+                                            "Authorization": f"Bearer {token}"
+                                        }
+                                        send_NPPS_json = {
+                                            "ShipType": 1,
+                                            "EshopId": "74A",
+                                            "EshopsonId": eshopsonId, 
+                                            "PaymentNo": f"74A{shipmentNo[:8]}"
+                                        }
 
-                                            # 等待結單對話框出現
-                                            time.sleep(2)  # 等待對話框完全顯示
-                                            # 檢查是否有下拉選單
-                                            has_dropdown = False
-                                            try:
-                                                dropdown = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
-                                                    (By.CSS_SELECTOR, 'span.structFinish-select-trigger')
-                                                ))
-                                                has_dropdown = True
-                                                print("檢測到有下拉選單")   
-                                                log_message(driver, "檢測到有下拉選單")
-                                            except:
-                                                print("檢測到沒有下拉選單")
-                                                log_message(driver, "檢測到沒有下拉選單")
-                                            tracking_info_new = f'{tracking_info} ({memo_date})'
-                                            # # 根據tracking_info選擇對應選項
-                                            delivery_keywords = ["包裹配達門市", "包裹已成功取件", "包裹已送達物流中心，進行理貨中", "等待配送中", "包裹配送中"]
-                                            preparation_keywords = ["廠商已準備出貨"]
-                                            force_majeure_keywords = ["持續未配送", "取件門市位於離島地區"]
-                                            return_keywords = ["包裹逾期未領，已送回物流中心", "包裹已送達物流中心，進行退貨處理中"]
-                                            oversize_keywords = ["包裹材積超過規範", "將退回廠商"]
-                                            store_issue_keywords = ["因門市因素無法配送，請與賣方客服聯繫重選取件門市", "請與賣方客服聯繫"]
-                                            # 根據不同情況處理
-                                            if has_dropdown:
-                                                with open(f'需要廠退日_暫不處理單.txt', 'a', encoding='utf-8') as f:
-                                                    f.write(f'工單號:{current_order_id} : 需要廠退日_暫不處理單,貨態:{tracking_info_new}\n')
-                                                # # 點擊下拉選單
-                                                # dropdown.click()
-                                                # time.sleep(1)
-                                                # log_message(driver, "已點擊下拉選單")
-                                                
-                                                
-                                                # # 設置默認回覆訊息
-                                                # reply_message = tracking_info
-                                                # option_text = ""
-                                                
-                                                # # 根據關鍵字選擇選項和設置回覆訊息
-                                                # if any(keyword in tracking_info for keyword in preparation_keywords):
-                                                #     option_text = "包裹实际未交接、未收到包裹"
-                                                #     reply_message = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
-                                                # elif any(keyword in tracking_info for keyword in force_majeure_keywords):
-                                                #     option_text = "不可抗力已报备"
-                                                #     reply_message = "因取件門市位於離島地區，船班需視當地海象氣候配送，包裹到店將發送簡訊通知，還請以到店簡訊通知為主，造成不便，敬請見諒，感謝"
-                                                # elif any(keyword in tracking_info for keyword in return_keywords):
-                                                #     option_text = "无法物流履约，不需要菜鸟协助"
-                                                #     future_date = (datetime.now() + timedelta(days=7)).strftime("%m/%d")
-                                                #     reply_message = f"將退回清關行、具体原因：逾期未取、天猫海外预计时间：{future_date}"
-                                                # elif any(keyword in tracking_info for keyword in store_issue_keywords):
-                                                #     option_text = "无法物流履约，不需要菜鸟协助"
-                                                #     future_date = (datetime.now() + timedelta(days=7)).strftime("%m/%d")
-                                                #     reply_message = f"將退回清關行、具体原因：門市關轉、天猫海外预计时间：{future_date}"
-                                                # else:
-                                                #     #寫入記錄
-                                                #     with open(f'records/需要廠退日_暫不處理單.txt', 'a', encoding='utf-8') as f:
-                                                #         f.write(f'工單號:{current_order_id} : 需要廠退日_暫不處理單,貨態:{tracking_info},貨態時間:{memo_date}\n')
-                                                
-                                                # if option_text:
-                                                #     # 選擇下拉選單選項
-                                                #     option = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((
-                                                #         By.XPATH, f"//span[contains(text(), '{option_text}')]"
-                                                #     )))
-                                                #     driver.execute_script("arguments[0].click();", option)
-                                                #     print(f"已選擇選項: {option_text}")
-                                                
-                                                # # 找到備註文本框
-                                                # memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
-                                                #     (By.CSS_SELECTOR, 'textarea[name="memo"]')
-                                                # ))
-                                                
-                                                # # 使用剪貼板貼上文字
-                                                # pyperclip.copy(reply_message)  # 將文字複製到剪貼板
-                                                # actions = webdriver.ActionChains(driver)
-                                                # actions.click(memo_textarea).perform()  # 點擊文本框
-                                                # memo_textarea.clear()  # 清空文本框
-                                                # actions.key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()  # 貼上
-                                                # time.sleep(0.5)
-                                                
-                                                # # 點擊確定按鈕
-                                                # confirm_btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((
-                                                #     By.XPATH, "//span[contains(@class, 'structFinish-btn-helper') and contains(text(), '确定')]"
-                                                # )))
-                                            else:
-                                                # 沒有下拉選單的情況
-                                                memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
-                                                    (By.CSS_SELECTOR, 'textarea[name="memo"]')
-                                                ))
-                                                # preparation_keywords = ["廠商已準備出貨"]
-                                                if any(keyword in tracking_info for keyword in preparation_keywords):
-                                                    tracking_info_new = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
-                                                return_future_date = (memo_date + timedelta(days=5)).strftime("%m/%d")
-                                                if any(keyword in tracking_info for keyword in oversize_keywords):
-                                                        tracking_info_new = f"包裹材積超過規範，預計{return_future_date}退回清關行, 謝謝"
-                                                issue_future_date = (memo_date + timedelta(days=7)).strftime("%m/%d")
-                                                if any(keyword in tracking_info for keyword in store_issue_keywords):
-                                                    tracking_info_new = f"門市關轉，預計{issue_future_date}退回清關行, 謝謝"
-                                                
-                                                
-                                                # 檢查是否為結單對話框或留言對話框
+                                        npps_data = json.dumps(send_NPPS_json)
+                                        print(f"正在請求追蹤信息, URL: {track_NPPS_url}")
+                                        track_NPPS_response = None
+                                        try:
+                                            track_NPPS_response = requests.post(
+                                                track_NPPS_url,
+                                                headers=track_NPPS_headers,
+                                                data=npps_data,
+                                                timeout=30
+                                            ) 
+                                            print(f"追蹤 NPPS_API 響應狀態碼: {track_NPPS_response.status_code}")
+                                            print(f"追蹤 NPPS_API 響應內容: {track_NPPS_response.text}")
                                             
-                                                # 使用剪貼板貼上文字
-                                                pyperclip.copy(tracking_info_new)  # 將文字複製到剪貼板
-                                                actions = webdriver.ActionChains(driver)
-                                                actions.click(memo_textarea).perform()  # 點擊文本框
-                                                # 清空文本框
-                                                actions.key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()  # 貼上
-                                                time.sleep(1)
-                                                finish_btn = driver.find_element(By.XPATH, "//span[contains(@class, 'cDeskStructFunctionComponent-btn-helper') and contains(text(), '确定并提交')]")
-                                                submit_btn_text = "确定并提交"                                               
-                                                
-                                                
-                                                submit_btn = WebDriverWait(driver, 2).until(
-                                                    EC.element_to_be_clickable((By.XPATH, f"//span[contains(text(), '{submit_btn_text}')]"))
-                                                )
-                                                driver.execute_script("arguments[0].click();", submit_btn)
-                                                time.sleep(2)
-                                                print(f"已點擊{submit_btn_text}按鈕")
-                                                
-                                                # 等待結單對話框消失
-                                                try:
-                                                    WebDriverWait(driver, 10).until_not(
-                                                        EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'next-dialog-wrapper')]"))
-                                                    )
-                                                    time.sleep(2)
-                                                    print("對話框已消失")
-                                                    # log_message(driver, "對話框已消失")
-                                                except Exception as e:
-                                                    print(f"等待對話框消失時發生錯誤: {str(e)}")
-                                                    log_message(driver, f"等待對話框消失時發生錯誤: {str(e)}")
-                                                time.sleep(2)
+                                            # 將 NPPS 查詢結果寫入記錄
+                                            with open(f'records/{current_order_id}.txt', 'a', encoding='utf-8') as f:
+                                                f.write(f'\nNPPS 狀態查詢:')
+                                                f.write(f'\n結果: {track_NPPS_response.text.replace('"', '').replace('\n', '')}\n')
                                                 
                                         except Exception as e:
-                                            with open(f'投訴單_請人工處理.txt', 'a', encoding='utf-8') as f:
-                                                f.write(f'工單號:{current_order_id} : 投訴單_請人工處理,貨態:{tracking_info_new}\n')
-                                            print(f"此為投訴單或此頁面無結單按鈕: {str(e)}")
-                                            log_message(driver, f"此為投訴單或此頁面無結單按鈕: {str(e)},關閉視窗並繼續下一筆...")
-                                            print("關閉視窗並繼續下一筆...")
-                                            time.sleep(2)
+                                            print(f"NPPS 狀態查詢失敗: {str(e)}")
+                                            log_message(driver, f"NPPS 狀態查詢失敗: {str(e)}")
+
+                                        if track_NPPS_response.status_code == 200:
+                                            track_data = track_NPPS_response.json()
+                                            PpsType = track_data.get("ppsType")
+                                            PpsDate = track_data.get("ppsDate")
+                                            PpsTime = track_data.get("ppsTime")
+                                            PpsName = track_data.get("ppsName")
+                                            ErrorCodeDescription = track_data.get("errorCodeDescription")
+                                            Npps_ErrorCode = track_data.get("errorCode")
+                                       
+                                        # 修改日期格式處理
+                                        if PpsDate and PpsTime:
+                                            # 合併日期和時間字串
+                                            date_str = f"{PpsDate} {PpsTime}"
+                                            # 轉換格式
+                                            try:
+                                                date_obj = datetime.strptime(date_str, "%Y%m%d %H%M%S")
+                                                Npps_Date = date_obj.strftime("%Y-%m-%d %H:%M:%S")
+                                            except Exception as e:
+                                                print(f"日期時間格式轉換錯誤: {str(e)}")
+                                                Npps_Date = ''
+                                        else:
+                                            Npps_Date = ''  
+                                        
+                                        if Npps_ErrorCode == 0:
+                                            try:
+                                                print("準備點擊結單按鈕...")
+                                                # 使用更短的等待時間尋找結單按鈕
+                                                
+                                                finish_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
+                                                    (By.XPATH, "//span[contains(@class, 'next-btn-helper') and contains(text(), '结单')]")
+                                                ))
+                                                driver.execute_script("arguments[0].click();", finish_btn)
+                                                print("已點擊結單按鈕")
+
+                                                # 等待結單對話框出現
+                                                time.sleep(3)  # 等待對話框完全顯示
+                                                # 檢查是否有下拉選單
+                                                has_dropdown = False
+                                                try:
+                                                    dropdown = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
+                                                        (By.CSS_SELECTOR, 'span.structFinish-select-trigger')
+                                                    ))
+                                                    has_dropdown = True
+                                                    print("檢測到有下拉選單")   
+                                                    log_message(driver, "檢測到有下拉選單")
+                                                except:
+                                                    print("檢測到沒有下拉選單")
+                                                    log_message(driver, "檢測到沒有下拉選單")
+                                                tracking_info_new = f'{PpsName} ({Npps_Date})'
+                                               
+                                                # 根據不同情況處理
+                                                if has_dropdown:
+                                                    # # 點擊下拉選單
+                                                    # 根據PpsType選擇不同的處理邏輯
+                                                    if PpsType == 'AOLL' or PpsType == 'AOL' or PpsType == 'EIN00' or PpsType == 'EIN60' or PpsType == 'EIN62' or PpsType == 'PP00' or PpsType == 'PP01' or PpsType == 'PPS101':
+                                                        # 選擇第一個下拉選單
+                                                        first_dropdown = WebDriverWait(driver, 2).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
+                                                        )
+                                                        first_dropdown.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 選擇"已完成物流履約"
+                                                        option = WebDriverWait(driver, 2).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '已经完成物流履约')]"))
+                                                        )
+                                                        option.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 選擇第二個下拉選單
+                                                        second_dropdown = WebDriverWait(driver, 2).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
+                                                        )
+                                                        second_dropdown.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 選擇"其他"
+                                                        other_option = WebDriverWait(driver, 2).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '其他')]"))
+                                                        )
+                                                        other_option.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 填寫物流狀態
+                                                        logistics_status = WebDriverWait(driver, 2).until(
+                                                            EC.presence_of_element_located((By.ID, "0_logisticsStatus"))
+                                                        )
+
+                                                        if PpsType == 'AOL' or PpsType == 'AOLL':
+                                                            messageInfo = f'已完成包裹成功取件，感謝({Npps_Date})'
+                                                        elif PpsType == 'EIN00' or PpsType == 'EIN60' or PpsType == 'EIN62':
+                                                            messageInfo = f'包裹已送達物流中心，進行理貨中，後續將安排配送至取貨門市，感謝({Npps_Date})'
+                                                        elif PpsType == 'PP00' or PpsType == 'PP01':
+                                                            messageInfo = f'包裹進行配送中，後續將安排配送至取貨門市，感謝({Npps_Date})'
+                                                        elif PpsType == 'PPS101':
+                                                            messageInfo = f'包裹已配達門市，煩請通知顧客盡快前往門市取件，感謝({Npps_Date})'
+
+                                                        logistics_status.clear()
+                                                        logistics_status.send_keys(messageInfo)                                                        
+                                                        
+                                                        
+                                                    elif PpsType == 'EIN09':
+                                                        # 選擇第一個下拉選單
+                                                        first_dropdown = WebDriverWait(driver, 2).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
+                                                        )
+                                                        first_dropdown.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 選擇"包裹實際未交接、未收到包裹"
+                                                        option = WebDriverWait(driver, 5).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '包裹实际未交接、未收到包裹')]"))
+                                                        )
+                                                        option.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 選擇第二個下拉選單
+                                                        second_dropdown = WebDriverWait(driver, 5).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
+                                                        )
+                                                        second_dropdown.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 選擇"其他"
+                                                        other_option = WebDriverWait(driver, 5).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '其他')]"))
+                                                        )
+                                                        other_option.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 填寫物流公司
+                                                        logistics_company = WebDriverWait(driver, 5).until(
+                                                            EC.presence_of_element_located((By.ID, "0_logisticsCompany"))
+                                                        )
+                                                        logistics_company.clear()
+                                                        logistics_company.send_keys("我方未收到包裹，請與菜鳥台灣倉確認，感謝({Npps_Date})")
+                                                        
+                                                    elif PpsType == 'EIN36' or PpsType == 'PPS015' or PpsType == 'EIN35' or PpsType == 'EIN99' or PpsType == 'PPS201' or PpsType == 'EIN31' or PpsType == 'EIN32' or PpsType == 'EIN3A' or PpsType == 'EIN3B' or PpsType == 'EIN3C' or PpsType == 'EIN37' or PpsType == 'EIN38' or PpsType == 'EIN39':
+                                                        # 選擇第一個下拉選單
+                                                        first_dropdown = WebDriverWait(driver, 5).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
+                                                        )
+                                                        first_dropdown.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 選擇"***无法物流履约，不需要菜鸟协助"
+                                                        option = WebDriverWait(driver, 5).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '***无法物流履约，不需要菜鸟协助')]"))
+                                                        )
+                                                        option.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 選擇第二個下拉選單
+                                                        second_dropdown = WebDriverWait(driver, 5).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
+                                                        )
+                                                        second_dropdown.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 選擇"其他"
+                                                        other_option = WebDriverWait(driver, 5).until(
+                                                            EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '原因')]"))
+                                                        )
+                                                        other_option.click()
+                                                        time.sleep(1)
+                                                        
+                                                        # 填寫天猫海外回复包裹状态
+                                                        logistics_company = WebDriverWait(driver, 5).until(
+                                                            EC.presence_of_element_located((By.ID, "0_tmallPackageStatus"))
+                                                        )
+                                                        logistics_company.clear()
+                                                        logistics_company.send_keys(f"將退回清關行")
+
+                                                        if PpsType == 'EIN36' or PpsType == 'PPS015':
+                                                            issue_future_date = (Npps_Date + timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
+                                                            messageInfo = f"門市關轉"
+                                                        elif PpsType == 'EIN35':
+                                                            issue_future_date = (Npps_Date + timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
+                                                            messageInfo = f"不正常到貨"
+                                                        elif PpsType == 'EIN99':
+                                                            issue_future_date = (Npps_Date + timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
+                                                            messageInfo = f"超過進貨期限，配編已失效"
+                                                        elif PpsType == 'PPS201':
+                                                            issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%Y-%m-%d 00:00:00")
+                                                            messageInfo = f"逾期未取"
+                                                        elif PpsType == 'EIN31' or PpsType == 'EIN3A' or PpsType == 'EIN3B' or PpsType == 'EIN3C':
+                                                            issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%Y-%m-%d 00:00:00")
+                                                            messageInfo = f"進貨包裝不良"
+                                                        elif PpsType == 'EIN32':
+                                                            issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%Y-%m-%d 00:00:00")
+                                                            messageInfo = f"超才"
+                                                        elif PpsType == 'EIN37' or PpsType == 'EIN38' or PpsType == 'EIN39':
+                                                            issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%Y-%m-%d 00:00:00")
+                                                            messageInfo = f"標籤條碼異常，無法刷讀"
+                                                        
+
+                                                        # 填寫具体原因
+                                                        logistics_company = WebDriverWait(driver, 5).until(
+                                                            EC.presence_of_element_located((By.ID, "0_specificReason"))
+                                                        )
+                                                        logistics_company.clear()
+                                                        logistics_company.send_keys(f"{messageInfo}")
+
+                                                        # 填寫預計退回日期
+                                                        return_date_input = WebDriverWait(driver, 5).until(
+                                                            EC.presence_of_element_located((By.XPATH, "//input[@placeholder='请选择日期和时间']"))
+                                                        )
+                                                        return_date_input.clear()
+                                                        return_date_input.send_keys(issue_future_date)
+                                                        
+                                                        
+                                                    elif PpsType == 'EVR01' or PpsType == 'EVR11' or PpsType == 'EVR12' or PpsType == 'EVR13' or PpsType == 'EVR14' or PpsType == 'EVR15' or PpsType == 'EVR21' or PpsType == 'EVR31' or PpsType == 'EVR32' or PpsType == 'EVR34' or PpsType == 'EVR35' or PpsType == 'EVR36' or PpsType == 'EVR37' or PpsType == 'EVR38' or PpsType == 'EVR39' or PpsType == 'EVR3A' or PpsType == 'EVR3B' or PpsType == 'EVR3C' or PpsType == 'EVR99':
+                                                        # 計算退回日期
+                                                        pps_date = datetime.strptime(PpsDate, "%Y%m%d")
+                                                        return_date = pps_date + timedelta(days=7)
+                                                        today = datetime.now()
+                                                        
+                                                        if return_date > today:
+                                                            # 選擇第一個下拉選單
+                                                            first_dropdown = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
+                                                            )
+                                                            first_dropdown.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 選擇"包裹實際已交接給XXX物流商、下一階段"
+                                                            option = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '包裹实际已经交接给xxx物流商、下一阶段')]"))
+                                                            )
+                                                            option.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 選擇第二個下拉選單
+                                                            second_dropdown = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
+                                                            )
+                                                            second_dropdown.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 選擇"其他"
+                                                            other_option = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '其他')]"))
+                                                            )
+                                                            other_option.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 填寫物流公司
+                                                            logistics_company = WebDriverWait(driver, 5).until(
+                                                                EC.presence_of_element_located((By.ID, "0_logisticsCompany"))
+                                                            )
+                                                            logistics_company.clear()
+                                                            return_date_str = return_date.strftime("%Y-%m-%d")
+                                                            logistics_company.send_keys(f"已退回清關行，廠退日{return_date_str}")
+                                                    
+                                                    elif PpsType == 'PPS013':
+                                                        # 計算退回日期
+                                                        pps_date = datetime.strptime(PpsDate, "%Y%m%d")
+                                                        return_date = pps_date + timedelta(days=7)
+                                                        today = datetime.now()
+                                                        
+                                                        if return_date > today:
+                                                            # 選擇第一個下拉選單
+                                                            first_dropdown = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
+                                                            )
+                                                            first_dropdown.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 選擇"不可抗力已报备"
+                                                            option = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '不可抗力已报备')]"))
+                                                            )
+                                                            option.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 選擇第二個下拉選單
+                                                            second_dropdown = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
+                                                            )
+                                                            second_dropdown.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 選擇"原因（海关查验、其他等）"
+                                                            other_option = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '原因（海关查验、其他等）')]"))
+                                                            )
+                                                            other_option.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 填寫物流状态
+                                                            logistics_company = WebDriverWait(driver, 5).until(
+                                                                EC.presence_of_element_located((By.ID, "0_logisticsStatus"))
+                                                            )
+                                                            logistics_company.clear()
+                                                            return_date_str = (Npps_Date + timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
+                                                            logistics_company.send_keys(f"因取件門市位於離島地區，船班需視當地海象氣候配送，包裹到店將發送簡訊通知，還請以到店簡訊通知為主，造成不便，敬請見諒，感謝")
+
+                                                            # 填寫预计解决时间
+                                                            return_date_input = WebDriverWait(driver, 5).until(
+                                                                EC.presence_of_element_located((By.XPATH, "//input[@placeholder='请选择日期和时间']"))
+                                                            )
+                                                            return_date_input.clear()
+                                                            return_date_input.send_keys(return_date_str)
+
+
+                                                    elif PpsType == 'EIN61' or PpsType == 'PPS303':
+                                                        # 計算退回日期
+                                                        pps_date = datetime.strptime(PpsDate, "%Y%m%d")
+                                                        return_date = pps_date + timedelta(days=7)
+                                                        today = datetime.now()
+                                                        
+                                                        if return_date > today:
+                                                            # 選擇第一個下拉選單
+                                                            first_dropdown = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
+                                                            )
+                                                            first_dropdown.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 選擇"确认丢失"
+                                                            option = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '确认丢失')]"))
+                                                            )
+                                                            option.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 選擇第二個下拉選單
+                                                            second_dropdown = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
+                                                            )
+                                                            second_dropdown.click()
+                                                            time.sleep(1)
+                                                            
+                                                            # 選擇"其他"
+                                                            other_option = WebDriverWait(driver, 5).until(
+                                                                EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '其他')]"))
+                                                            )
+                                                            other_option.click()
+                                                            time.sleep(1)
+
+                                                    # 點擊生成預覽按鈕
+                                                    preview_btn = WebDriverWait(driver, 5).until(
+                                                        EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'preview-generate-btn')]//span[contains(@class, 'structFinish-btn-helper') and contains(text(), '生成预览')]"))
+                                                    )
+                                                    driver.execute_script("arguments[0].scrollIntoView(true);", preview_btn)
+                                                    time.sleep(1)
+                                                    driver.execute_script("arguments[0].click();", preview_btn)
+                                                    time.sleep(2)
+
+                                                    if PpsType == 'EIN61' or PpsType == 'PPS303':
+                                                        time.sleep(2)
+                                                        messageInfoNew = "包裹遺失將進行賠償程序"
+                                                        # 找到 textarea 元素
+                                                        memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
+                                                            (By.CSS_SELECTOR, 'textarea[name="memo"]')
+                                                        ))
+                                                        # 獲取原有的文字
+                                                        existing_text = memo_textarea.get_attribute('value')
+                                                        
+                                                        # 將新訊息加到原有文字後面
+                                                        memo_textarea.clear()
+                                                        memo_textarea.send_keys(existing_text + messageInfoNew)
+                                                    
+                                                    # 點擊保存按鈕
+                                                    save_btn = WebDriverWait(driver, 5).until(
+                                                        EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'cdesk-dialog-structClose-footer-btn')]//span[contains(@class, 'structFinish-btn-helper') and contains(text(), '保存')]"))
+                                                    )
+                                                    driver.execute_script("arguments[0].scrollIntoView(true);", save_btn)
+                                                    time.sleep(1)
+                                                    driver.execute_script("arguments[0].click();", save_btn)
+                                                    time.sleep(2)
+
+                                                    # 點擊確定按鈕
+                                                    confirm_btn = WebDriverWait(driver, 5).until(
+                                                        EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'cdesk-dialog-structClose-footer-btn')]//span[contains(@class, 'structFinish-btn-helper') and contains(text(), '确定')]"))
+                                                    )
+                                                    driver.execute_script("arguments[0].scrollIntoView(true);", confirm_btn)
+                                                    time.sleep(1)
+                                                    driver.execute_script("arguments[0].click();", confirm_btn)
+                                                    time.sleep(2)
+
+                                                    # 等待結單對話框消失
+                                                    try:
+                                                        WebDriverWait(driver, 10).until_not(
+                                                            EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'next-dialog-wrapper')]"))
+                                                        )
+                                                        time.sleep(2)
+                                                        print("對話框已消失")
+                                                        # log_message(driver, "對話框已消失")
+                                                    except Exception as e:
+                                                        print(f"等待對話框消失時發生錯誤: {str(e)}")
+                                                        log_message(driver, f"等待對話框消失時發生錯誤: {str(e)}")
+                                                    time.sleep(2)
+                                                    
+                                                else:
+                                                    # 沒有下拉選單的情況
+                                                    memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
+                                                        (By.CSS_SELECTOR, 'textarea[name="memo"]')
+                                                    ))
+
+                                                    if PpsType == "AOL" or PpsType == "AOLL":
+                                                        tracking_info_new = "已完成包裹成功取件，感謝"
+
+                                                    elif PpsType == "EIN00" or PpsType == "EIN60" or PpsType == "EIN62":
+                                                        tracking_info_new = "包裹已送達物流中心，進行理貨中，後續將安排配送至取貨門市，感謝"
+
+                                                    elif PpsType == "PP00" or PpsType == "PP01":
+                                                        tracking_info_new = "包裹進行配送中，後續將安排配送至取貨門市，感謝"   
+                                                   
+                                                    elif PpsType == "PPS101":
+                                                        tracking_info_new = "包裹已配達門市，煩請通知顧客盡快前往門市取件，感謝"
+
+                                                    elif PpsType == "EIN09":
+                                                        tracking_info_new = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
+
+                                                    elif PpsType == "EIN36" or PpsType == "PPS015":
+                                                        issue_future_date = (Npps_Date + timedelta(days=7)).strftime("%m/%d")
+                                                        tracking_info_new = f"門市關轉，預計{issue_future_date}退回清關行, 謝謝"
+
+                                                    elif PpsType == "EIN35":
+                                                        tracking_info_new = "不正常到貨(因未上傳包裹資料或未於進貨日進貨)，我方無法驗收配送，預計{D+7天}退回清關行，謝謝"
+                                                    
+                                                    elif PpsType == "EIN99":
+                                                        issue_future_date = (Npps_Date + timedelta(days=7)).strftime("%m/%d")
+                                                        tracking_info_new = "超過進貨期限，配編已失效，預計{issue_future_date}退回清關行，謝謝"
+                                                    
+                                                    elif PpsType == "PPS201":
+                                                        issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%m/%d")
+                                                        tracking_info_new = "逾期未取，預計{issue_future_date}退回清關行，謝謝"
+                                                    
+                                                    elif PpsType == "EIN31" or PpsType == "EIN3A" or PpsType == "EIN3B" or PpsType == "EIN3C":
+                                                        issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%m/%d")
+                                                        tracking_info_new = "進貨包裝不良，預計{issue_future_date}退回清關行，謝謝"
+                                                    
+                                                    elif PpsType == "EIN32":
+                                                        issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%m/%d")
+                                                        tracking_info_new = "超才，預計{issue_future_date}退回清關行，謝謝"
+                                                    
+                                                    elif PpsType == "EIN37" or PpsType == "EIN38" or PpsType == "EIN39":
+                                                        issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%m/%d")
+                                                        tracking_info_new = "標籤條碼異常，無法刷讀，預計{issue_future_date}退回清關行，謝謝"
+                                                    
+                                                    elif PpsType == "EIN61" or PpsType == "PPS303":
+                                                        tracking_info_new = "包裹遺失將進行賠償程序，造成不便，敬請見諒，感謝"
+                                                    
+                                                    elif PpsType == "PPS013":
+                                                        tracking_info_new = "因取件門市位於離島地區，船班需視當地海象氣候配送，包裹到店將發送簡訊通知，還請以到店簡訊通知為主，造成不便，敬請見諒，感謝"
+                                                    
+                                                    elif PpsType == "EIN63":
+                                                        tracking_info_new = "包裹遺失將進行賠償程序，造成不便，敬請見諒，感謝"                                                    
+                                                    
+                                                    # 處理超規格包裹
+                                                    elif PpsType == "EVR01" or PpsType == "EVR11" or PpsType == "EVR12" or PpsType == "EVR13" or PpsType == "EVR14" or PpsType == "EVR15" or PpsType == "EVR21" or PpsType == "EVR31" or PpsType == "EVR32" or PpsType == "EVR34" or PpsType == "EVR35" or PpsType == "EVR36" or PpsType == "EVR37" or PpsType == "EVR38" or PpsType == "EVR39" or PpsType == "EVR3A" or PpsType == "EVR3B" or PpsType == "EVR3C" or PpsType == "EVR99":
+                                                        return_future_date = (Npps_Date + timedelta(days=1)).strftime("%Y/%m/%d")
+                                                        tracking_info_new = f"{return_future_date}已退回清關行, 謝謝"
+                                                    
+                                                    
+                                                    # 檢查是否為結單對話框或留言對話框
+                                                
+                                                    # 使用剪貼板貼上文字
+                                                    pyperclip.copy(tracking_info_new)  # 將文字複製到剪貼板
+                                                    actions = webdriver.ActionChains(driver)
+                                                    actions.click(memo_textarea).perform()  # 點擊文本框
+                                                    # 清空文本框
+                                                    actions.key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()  # 貼上
+                                                    time.sleep(1)
+                                                    finish_btn = driver.find_element(By.XPATH, "//span[contains(@class, 'cDeskStructFunctionComponent-btn-helper') and contains(text(), '确定并提交')]")
+                                                    submit_btn_text = "确定并提交"                                               
+                                                    
+                                                    
+                                                    submit_btn = WebDriverWait(driver, 2).until(
+                                                        EC.element_to_be_clickable((By.XPATH, f"//span[contains(text(), '{submit_btn_text}')]"))
+                                                    )
+                                                    driver.execute_script("arguments[0].click();", submit_btn)
+                                                    time.sleep(2)
+                                                    print(f"已點擊{submit_btn_text}按鈕")
+                                                    
+                                                    # 等待結單對話框消失
+                                                    try:
+                                                        WebDriverWait(driver, 10).until_not(
+                                                            EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'next-dialog-wrapper')]"))
+                                                        )
+                                                        time.sleep(2)
+                                                        print("對話框已消失")
+                                                        # log_message(driver, "對話框已消失")
+                                                    except Exception as e:
+                                                        print(f"等待對話框消失時發生錯誤: {str(e)}")
+                                                        log_message(driver, f"等待對話框消失時發生錯誤: {str(e)}")
+                                                    time.sleep(2)
+                                                    
+                                            except Exception as e:
+                                                with open(f'投訴單_請人工處理.txt', 'a', encoding='utf-8') as f:
+                                                    f.write(f'工單號:{current_order_id} : 投訴單_請人工處理,貨態:{tracking_info_new}\n')
+                                                print(f"此為投訴單或此頁面無結單按鈕: {str(e)}")
+                                                log_message(driver, f"此為投訴單或此頁面無結單按鈕: {str(e)},關閉視窗並繼續下一筆...")
+                                                print("關閉視窗並繼續下一筆...")
+                                                time.sleep(2)
+                                                # 關閉當前視窗並切換回原始視窗
+                                                try:
+                                                    driver.close()
+                                                    driver.switch_to.window(original_window)
+                                                    print("已關閉視窗並切換回原始視窗")
+                                                    log_message(driver, "已關閉視窗並切換回原始視窗")
+                                                except Exception as close_error:
+                                                    print(f"關閉視窗時發生錯誤: {str(close_error)}")
+                                                    log_message(driver, f"關閉視窗時發生錯誤: {str(close_error)}")
+                                                continue    
+                                        else:
+                                            print(f"貨態查詢失敗 (errorCode: {Npps_ErrorCode}), 跳過結單操作")
+                                            log_message(driver, f"貨態查詢失敗 (errorCode: {Npps_ErrorCode}), 跳過結單操作")
+                                            with open(f'貨態查詢失敗_無法處理單.txt', 'a', encoding='utf-8') as f:
+                                                f.write(f'工單號:{current_order_id} : 錯誤描述: {ErrorCodeDescription}\n')
                                             # 關閉當前視窗並切換回原始視窗
                                             try:
                                                 driver.close()
@@ -940,10 +1168,10 @@ try:
                                                 log_message(driver, f"關閉視窗時發生錯誤: {str(close_error)}")
                                             continue
                                     else:
-                                        print(f"貨態查詢失敗 (errorCode: {errorCode}), 跳過結單操作")
-                                        log_message(driver, f"貨態查詢失敗 (errorCode: {errorCode}), 跳過結單操作")
+                                        print(f"貨態查詢失敗 (errorCode: {Npps_ErrorCode}), 跳過結單操作")
+                                        log_message(driver, f"貨態查詢失敗 (errorCode: {Npps_ErrorCode}), 跳過結單操作")
                                         with open(f'貨態查詢失敗_無法處理單.txt', 'a', encoding='utf-8') as f:
-                                            f.write(f'工單號:{current_order_id} : 錯誤描述: {errorCodeDescription}\n')
+                                            f.write(f'工單號:{current_order_id} : 錯誤描述: {ErrorCodeDescription}\n')
                                         # 關閉當前視窗並切換回原始視窗
                                         try:
                                             driver.close()
