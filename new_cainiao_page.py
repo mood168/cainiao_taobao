@@ -63,80 +63,42 @@ def process_current_page(driver, processed_orders, current_page):
     wait = WebDriverWait(driver, 30)
     original_window = driver.current_window_handle
     
-    try:
-        # 重新獲取當前頁面連結(解決頁面切換後元素失效問題)
-        current_page_links = retry_operation(
-            lambda: driver.find_elements(By.XPATH, "//table//a[string-length(text())=14 and translate(text(), '0123456789', '') = '']"),
-            max_retries=5,
-            delay=2
+    # 重新獲取當前頁面連結(解決頁面切換後元素失效問題)
+    current_page_links = retry_operation(
+        lambda: driver.find_elements(By.XPATH, "//table//a[string-length(text())=14 and translate(text(), '0123456789', '') = '']"),
+        max_retries=5,
+        delay=2
+    )
+    
+    if not current_page_links:
+        print(f"第 {current_page} 頁沒有找到工單連結")
+        return False
+    # 移除重複的工單連結
+    unique_links = []
+    seen_order_ids = set()
+    for link in current_page_links:
+        order_id = link.text
+        if order_id not in seen_order_ids:
+            seen_order_ids.add(order_id)
+            unique_links.append(link)
+    current_page_links = unique_links
+    log_message(driver, f"開始處理第 {current_page} 頁的 {len(current_page_links)} 個工單")
+
+    for index, order_link in enumerate(current_page_links, 1):
+        process_single_order(
+            driver=driver,
+            order_link=order_link,
+            processed_orders=processed_orders,
+            index=index,
+            total_orders=len(current_page_links),
+            page_number=current_page
         )
         
-        if not current_page_links:
-            log_message(driver, f"第 {current_page} 頁沒有找到工單連結")
-            return False
+        # 每次處理後重新獲取窗口控制權
+        driver.switch_to.window(original_window)
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
         
-        # 移除重複的工單連結
-        unique_links = []
-        seen_order_ids = set()
-        for link in current_page_links:
-            try:
-                order_id = link.text
-                if order_id not in seen_order_ids:
-                    seen_order_ids.add(order_id)
-                    unique_links.append(link)
-            except StaleElementReferenceException:
-                log_message(driver, "處理工單連結時發現元素已失效，跳過此連結")
-                continue
-            except Exception as e:
-                log_message(driver, f"處理工單連結時發生錯誤: {str(e)}，跳過此連結")
-                continue
-                
-        current_page_links = unique_links
-        if not current_page_links:
-            log_message(driver, f"第 {current_page} 頁沒有有效的工單連結")
-            return False
-            
-        log_message(driver, f"開始處理第 {current_page} 頁的 {len(current_page_links)} 個工單")
-
-        for index, order_link in enumerate(current_page_links, 1):
-            try:
-                process_single_order(
-                    driver=driver,
-                    order_link=order_link,
-                    processed_orders=processed_orders,
-                    index=index,
-                    total_orders=len(current_page_links),
-                    page_number=current_page
-                )
-                
-                # 每次處理後重新獲取窗口控制權
-                driver.switch_to.window(original_window)
-                wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
-            except StaleElementReferenceException:
-                log_message(driver, f"第 {current_page} 頁的第 {index} 個工單連結已失效，跳過")
-                continue
-            except Exception as e:
-                log_message(driver, f"處理第 {current_page} 頁的第 {index} 個工單時發生錯誤: {str(e)}，跳過")
-                # 確保返回原始窗口
-                try:
-                    if len(driver.window_handles) > 1:
-                        driver.close()
-                    driver.switch_to.window(original_window)
-                except Exception:
-                    pass
-                continue
-        
-        return True
-    except Exception as e:
-        log_message(driver, f"處理第 {current_page} 頁時發生錯誤: {str(e)}")
-        # 確保返回原始窗口
-        try:
-            if driver.current_window_handle != original_window:
-                driver.close()
-            driver.switch_to.window(original_window)
-        except Exception:
-            pass
-        return False
+    return True
 
 def process_single_order(driver, order_link, processed_orders, index, total_orders, page_number):
     wait = WebDriverWait(driver, 30)
@@ -153,18 +115,15 @@ def process_single_order(driver, order_link, processed_orders, index, total_orde
         return
     
     try:
-        # 每次處理前重新讀取處理記錄文件，確保使用最新數據
-        updated_processed_orders = load_processed_orders()
-        
         # 檢查是否已處理過
-        if current_order_id in updated_processed_orders:
-            log_message(driver, f"\n工單 {current_order_id} 已於 {updated_processed_orders[current_order_id]['processed_time']} 處理過,跳過處理")
+        if current_order_id in processed_orders:
+            log_message(driver, f"\n工單 {current_order_id} 已於 {processed_orders[current_order_id]['processed_time']} 處理過,跳過處理")
             return
             
         log_message(driver, f"開始處理第 {page_number} 頁的第 {index}/{total_orders} 個工單: {current_order_id}")
         
         # 在開始處理前先保存到記錄中
-        save_processed_order(current_order_id, order_url, driver=driver)
+        save_processed_order(current_order_id, order_url)
         
         # 點擊工單連結並切換到新窗口
         old_handles = driver.window_handles
@@ -181,9 +140,9 @@ def process_single_order(driver, order_link, processed_orders, index, total_orde
         
         # 檢查是否為投诉工单
         try:
-            complaint_element = driver.find_element(By.XPATH, "//span[contains(text(), '「 投诉工单 」')]")
+            complaint_element = driver.find_element(By.XPATH, "//span[contains(text(), '投诉工单')]")
             if complaint_element:
-                log_message(driver, "檢測到投诉工单1,關閉頁面") 
+                log_message(driver, "檢測到投诉工单,關閉頁面") 
                 driver.close()
                 driver.switch_to.window(original_window)
                 return
@@ -406,7 +365,7 @@ try:
             
             if current_page_links:
                 all_order_links.extend(current_page_links)
-                # log_message(driver, f"在當前頁面找到 {len(current_page_links)} 個工單連結")
+                log_message(driver, f"在當前頁面找到 {len(current_page_links)} 個工單連結")
             else:
                 log_message(driver, "當前頁面沒有找到工單連結")
                 return []
@@ -429,98 +388,42 @@ try:
                 print(f"處理工單連結時發生錯誤: {str(e)}")
                 continue
         
-        # log_message(driver, f"總共找到 {len(unique_order_links)} 個有效工單連結")
+        log_message(driver, f"總共找到 {len(unique_order_links)} 個有效工單連結")
         return unique_order_links
 
     def load_processed_orders():
-        """載入已處理的工單記錄，並處理各種可能的錯誤情況"""
         try:
             if os.path.exists('processed_orders.json'):
-                try:
-                    with open('processed_orders.json', 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                    print(f"已載入處理記錄，共 {len(data)} 個工單")
+                with open('processed_orders.json', 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # print("\n已處理的工單列表:")
+                    # for order_id, info in data.items():
+                    #     print(f"工單號: {order_id}, 處理時間: {info['processed_time']}")
                     return data
-                except json.JSONDecodeError as e:
-                    print(f"處理記錄文件格式錯誤: {str(e)}，將創建新記錄")
-                    # 備份損壞的文件
-                    backup_name = f"processed_orders_backup_{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
-                    try:
-                        os.rename('processed_orders.json', backup_name)
-                        print(f"已將損壞的記錄文件備份為 {backup_name}")
-                    except Exception as backup_err:
-                        print(f"備份損壞文件時發生錯誤: {str(backup_err)}")
-                    return {}
-                except Exception as e:
-                    print(f"讀取處理記錄時發生錯誤: {str(e)}，將創建新記錄")
-                    return {}
             else:
-                print("未找到處理記錄文件，將創建新的記錄")
+                log_message(driver, "未找到處理記錄文件,將創建新的記錄")
                 return {}
         except Exception as e:
-            print(f"檢查處理記錄時發生未預期錯誤: {str(e)}")
+            print(f"讀取處理記錄時發生錯誤: {str(e)}")
+            log_message(driver, "將重新創建處理記錄")
             return {}
 
-    def save_processed_order(order_id, order_url, driver=None):
-        """保存已處理的工單記錄，支持多實例併發訪問"""
-        max_retries = 3
-        for retry in range(max_retries):
-            try:
-                # 每次保存前都重新讀取文件，確保獲取最新數據
-                processed_orders = load_processed_orders()
-                
-                if order_id not in processed_orders:  # 只有在不存在時才添加
-                    processed_orders[order_id] = {
-                        'url': order_url,
-                        'processed_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    }
-                    
-                    # 使用臨時文件進行原子寫入，避免多實例訪問衝突
-                    temp_file = 'processed_orders_temp.json'
-                    try:
-                        with open(temp_file, 'w', encoding='utf-8') as f:
-                            json.dump(processed_orders, f, ensure_ascii=False, indent=2)
-                        
-                        # 在Windows上，如果文件存在則需要先刪除目標文件
-                        if os.path.exists('processed_orders.json'):
-                            os.replace(temp_file, 'processed_orders.json')
-                        else:
-                            os.rename(temp_file, 'processed_orders.json')
-                        
-                        message = f"已將工單 {order_id} 添加到處理記錄"    
-                        print(message)
-                        if driver:
-                            log_message(driver, message)
-                        return True
-                    except Exception as write_err:
-                        error_msg = f"寫入記錄文件時發生錯誤 (嘗試 {retry+1}/{max_retries}): {str(write_err)}"
-                        print(error_msg)
-                        if driver and retry == max_retries - 1:
-                            log_message(driver, error_msg)
-                        time.sleep(1)  # 短暫等待後重試
-                        continue
-                else:
-                    message = f"工單 {order_id} 已存在於處理記錄中"
-                    print(message)
-                    if driver:
-                        log_message(driver, message)
-                    return True
-                    
-            except Exception as e:
-                error_msg = f"保存處理記錄時發生錯誤 (嘗試 {retry+1}/{max_retries}): {str(e)}"
-                print(error_msg)
-                if driver and retry == max_retries - 1:
-                    log_message(driver, error_msg)
-                
-                if retry == max_retries - 1:
-                    # 最後一次嘗試，記錄錯誤但不拋出異常
-                    final_error = f"無法保存工單 {order_id} 的處理記錄: {str(e)}"
-                    print(final_error)
-                    with open(f'record_errors.txt', 'a', encoding='utf-8') as f:
-                        f.write(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - {final_error}\n')
-                time.sleep(1)  # 短暫等待後重試
-        
-        return False
+    def save_processed_order(order_id, order_url):
+        try:
+            processed_orders = load_processed_orders()
+            if order_id not in processed_orders:  # 只有在不存在時才添加
+                processed_orders[order_id] = {
+                    'url': order_url,
+                    'processed_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                with open('processed_orders.json', 'w', encoding='utf-8') as f:
+                    json.dump(processed_orders, f, ensure_ascii=False, indent=2)
+                log_message(driver, f"已將工單 {order_id} 添加到處理記錄")
+            else:
+                log_message(driver, f"此工單 {order_id} 已處理過")
+        except Exception as e:
+            print(f"保存處理記錄時發生錯誤: {str(e)}")
+            log_message(driver, f"保存處理記錄時發生錯誤: {str(e)}\n錯誤詳情: {traceback.format_exc()}")
 
     # 獲取所有工單連結
     order_links = retry_operation(find_order_links, max_retries=10, delay=3)
@@ -581,7 +484,7 @@ try:
                 
                 # 檢查是否為投诉工单
                 try:
-                    complaint_element = driver.find_element(By.XPATH, "//span[contains(text(), '「 投诉工单 」')]")
+                    complaint_element = driver.find_element(By.XPATH, "//span[contains(text(), '投诉工单')]")
                     if complaint_element:
                         log_message(driver, "檢測到投诉工单,關閉頁面") 
                         driver.close()
@@ -781,14 +684,11 @@ try:
                                                 date_str = f"{PpsDate} {PpsTime}"
                                                 try:
                                                     Npps_Date = datetime.strptime(date_str, "%Y%m%d %H%M%S")
-                                                    Npps_Date_Short = datetime.strptime(PpsDate, "%Y%m%d")
                                                 except Exception as e:
                                                     print(f"日期時間格式轉換錯誤: {str(e)}")
-                                                    Npps_Date = datetime.now().strftime("%Y-%m-%d")
-                                                    Npps_Date_Short = datetime.now().strftime("%Y-%m-%d")
+                                                    Npps_Date = datetime.now()
                                             else:
-                                                Npps_Date = datetime.now().strftime("%Y-%m-%d")
-                                                Npps_Date_Short = datetime.now().strftime("%Y-%m-%d")
+                                                Npps_Date = datetime.now()  
                                             
                                             if Npps_ErrorCode == 0:
                                                 try:
@@ -813,7 +713,7 @@ try:
                                                         log_message(driver, "檢測到有下拉選單")
                                                     except:
                                                         log_message(driver, "檢測到沒有下拉選單")
-                                                    tracking_info_new = f'{PpsName} ({Npps_Date_Short})'
+                                                    tracking_info_new = f'{PpsName} ({Npps_Date})'
                                                 
                                                     # 根據不同情況處理
                                                     if has_dropdown:
@@ -827,28 +727,28 @@ try:
                                                                 EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
                                                             )
                                                             first_dropdown.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 選擇"已完成物流履約"
                                                             option = WebDriverWait(driver, 2).until(
                                                                 EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '已经完成物流履约')]"))
                                                             )
                                                             option.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 選擇第二個下拉選單
                                                             second_dropdown = WebDriverWait(driver, 2).until(
                                                                 EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
                                                             )
                                                             second_dropdown.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 選擇"其他"
                                                             other_option = WebDriverWait(driver, 2).until(
                                                                 EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '其他')]"))
                                                             )
                                                             other_option.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 填寫物流狀態
                                                             logistics_status = WebDriverWait(driver, 2).until(
@@ -856,47 +756,47 @@ try:
                                                             )
 
                                                             if PpsType in ['AOL', 'AOLL']:
-                                                                messageInfo = f'已完成包裹成功取件，感謝({Npps_Date_Short})'
+                                                                messageInfo = f'已完成包裹成功取件，感謝({Npps_Date})'
                                                             elif PpsType in ['EIN00', 'EIN60', 'EIN62']:
-                                                                messageInfo = f'包裹已送達物流中心，進行理貨中，後續將安排配送至取貨門市，感謝({Npps_Date_Short})'
+                                                                messageInfo = f'包裹已送達物流中心，進行理貨中，後續將安排配送至取貨門市，感謝({Npps_Date})'
                                                             elif PpsType in ['PP00', 'PP01']:
-                                                                messageInfo = f'包裹進行配送中，後續將安排配送至取貨門市，感謝({Npps_Date_Short})'
+                                                                messageInfo = f'包裹進行配送中，後續將安排配送至取貨門市，感謝({Npps_Date})'
                                                             elif PpsType in ['PPS101']:
-                                                                messageInfo = f'包裹已配達門市，煩請通知顧客盡快前往門市取件，感謝({Npps_Date_Short})'
+                                                                messageInfo = f'包裹已配達門市，煩請通知顧客盡快前往門市取件，感謝({Npps_Date})'
 
                                                             logistics_status.clear()
                                                             logistics_status.send_keys(messageInfo)                                                        
                                                             
                                                             
-                                                        elif PpsType in ['EIN09', 'VIN']:
+                                                        elif PpsType in ['EIN09']:
                                                             log_message(driver, f"此單為:包裹实际未交接、未收到包裹")
                                                             # 選擇第一個下拉選單
                                                             first_dropdown = WebDriverWait(driver, 2).until(
                                                                 EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
                                                             )
                                                             first_dropdown.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 選擇"包裹實際未交接、未收到包裹"
                                                             option = WebDriverWait(driver, 5).until(
                                                                 EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '包裹实际未交接、未收到包裹')]"))
                                                             )
                                                             option.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 選擇第二個下拉選單
                                                             second_dropdown = WebDriverWait(driver, 5).until(
                                                                 EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
                                                             )
                                                             second_dropdown.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 選擇"其他"
                                                             other_option = WebDriverWait(driver, 5).until(
                                                                 EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '其他')]"))
                                                             )
                                                             other_option.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 填寫物流公司
                                                             logistics_company = WebDriverWait(driver, 5).until(
@@ -912,28 +812,28 @@ try:
                                                                 EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
                                                             )
                                                             first_dropdown.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 選擇"***无法物流履约，不需要菜鸟协助"
                                                             option = WebDriverWait(driver, 5).until(
                                                                 EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '***无法物流履约，不需要菜鸟协助')]"))
                                                             )
                                                             option.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 選擇第二個下拉選單
                                                             second_dropdown = WebDriverWait(driver, 5).until(
                                                                 EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
                                                             )
                                                             second_dropdown.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 選擇"其他"
                                                             other_option = WebDriverWait(driver, 5).until(
                                                                 EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '原因')]"))
                                                             )
                                                             other_option.click()
-                                                            time.sleep(1)
+                                                            time.sleep(3)
                                                             
                                                             # 填寫天猫海外回复包裹状态
                                                             logistics_company = WebDriverWait(driver, 5).until(
@@ -993,35 +893,36 @@ try:
                                                                     EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
                                                                 )
                                                                 first_dropdown.click()
-                                                                time.sleep(1)
+                                                                time.sleep(5)
                                                                 
                                                                 # 選擇"包裹實際已交接給XXX物流商、下一階段"
                                                                 option = WebDriverWait(driver, 5).until(
                                                                     EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '包裹实际已经交接给xxx物流商、下一阶段')]"))
                                                                 )
                                                                 option.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
                                                                 
                                                                 # 選擇第二個下拉選單
                                                                 second_dropdown = WebDriverWait(driver, 5).until(
                                                                     EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
                                                                 )
                                                                 second_dropdown.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
                                                                 
                                                                 # 選擇"其他"
                                                                 other_option = WebDriverWait(driver, 5).until(
                                                                     EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '其他')]"))
                                                                 )
                                                                 other_option.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
                                                                 
                                                                 # 填寫物流公司
                                                                 logistics_company = WebDriverWait(driver, 5).until(
                                                                     EC.presence_of_element_located((By.ID, "0_logisticsCompany"))
                                                                 )
                                                                 logistics_company.clear()
-                                                                logistics_company.send_keys(f"已退回清關行，廠退日{Npps_Date_Short}")
+                                                                return_date_str = return_date.strftime("%Y/%m/%d")
+                                                                logistics_company.send_keys(f"已退回清關行，廠退日{return_date_str}")
                                                         
                                                         elif PpsType in ['PPS013']:
                                                             log_message(driver, f"此單為:不可抗力已报备")
@@ -1036,28 +937,28 @@ try:
                                                                     EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
                                                                 )
                                                                 first_dropdown.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
                                                                 
                                                                 # 選擇"不可抗力已报备"
                                                                 option = WebDriverWait(driver, 5).until(
                                                                     EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '不可抗力已报备')]"))
                                                                 )
                                                                 option.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
                                                                 
                                                                 # 選擇第二個下拉選單
                                                                 second_dropdown = WebDriverWait(driver, 5).until(
                                                                     EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
                                                                 )
                                                                 second_dropdown.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
                                                                 
                                                                 # 選擇"原因（海关查验、其他等）"
                                                                 other_option = WebDriverWait(driver, 5).until(
                                                                     EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '原因（海关查验、其他等）')]"))
                                                                 )
                                                                 other_option.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
                                                                 
                                                                 # 填寫物流状态
                                                                 logistics_company = WebDriverWait(driver, 5).until(
@@ -1088,28 +989,28 @@ try:
                                                                     EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_packageInfo']"))
                                                                 )
                                                                 first_dropdown.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
                                                                 
                                                                 # 選擇"确认丢失"
                                                                 option = WebDriverWait(driver, 5).until(
                                                                     EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '确认丢失')]"))
                                                                 )
                                                                 option.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
                                                                 
                                                                 # 選擇第二個下拉選單
                                                                 second_dropdown = WebDriverWait(driver, 5).until(
                                                                     EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'structFinish-select-values')]//input[@id='0_exceptionReason']"))
                                                                 )
                                                                 second_dropdown.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
                                                                 
                                                                 # 選擇"其他"
                                                                 other_option = WebDriverWait(driver, 5).until(
                                                                     EC.element_to_be_clickable((By.XPATH, "//li[contains(@title, '其他')]"))
                                                                 )
                                                                 other_option.click()
-                                                                time.sleep(1)
+                                                                time.sleep(3)
 
                                                         # 點擊生成預覽按鈕
                                                         preview_btn = WebDriverWait(driver, 5).until(
@@ -1121,7 +1022,7 @@ try:
                                                         time.sleep(2)
 
                                                         if PpsType in ['EIN61', 'PPS303']:
-                                                            time.sleep(1)
+                                                            time.sleep(2)
                                                             messageInfoNew = "包裹遺失將進行賠償程序"
                                                             # 找到 textarea 元素
                                                             memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
@@ -1226,13 +1127,12 @@ try:
                                                             tracking_info_new = "包裹遺失將進行賠償程序，造成不便，敬請見諒，感謝"                                                    
                                                         
                                                         elif PpsType in ['VIN']:
-                                                            tracking_info_new = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
+                                                            tracking_info_new = PpsName
                                                         # 處理超規格包裹
                                                         elif PpsType in ['EVR01', 'EDR01', 'EVR11', 'EVR12', 'EVR13', 'EVR14', 'EVR15', 'EVR21', 'EVR31', 'EVR32', 'EVR34', 'EVR35', 'EVR36', 'EVR37', 'EVR38', 'EVR39', 'EVR3A', 'EVR3B', 'EVR3C', 'EVR99']:
                                                             return_future_date = (Npps_Date + timedelta(days=1)).strftime("%Y/%m/%d")
                                                             tracking_info_new = f"{return_future_date}已退回清關行, 謝謝"    
-                                                        else:
-                                                            tracking_info_new = PpsName
+                                                        
                                                     
                                                         # 使用剪貼板貼上文字
                                                         pyperclip.copy(tracking_info_new)  # 將文字複製到剪貼板
@@ -1324,7 +1224,7 @@ try:
                 
             # 在成功處理後保存記錄
             try:
-                save_processed_order(current_order_id, order_url, driver=driver)
+                save_processed_order(current_order_id, order_url)
                 log_message(driver, f"已記錄工單 {current_order_id} 的處理狀態")
             except Exception as e:
                 log_message(driver, f"保存工單處理記錄時發生錯誤: {str(e)}")
@@ -1358,109 +1258,63 @@ try:
             wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
             time.sleep(5)  # 等待動態內容載入
             
-            # 處理所有頁面的工單
+            has_next_page = True
             current_page = 1
-            has_more_pages = True
             
-            # 先切換到第一頁，確保從頭開始處理
-            try:
-                first_page_btn = wait.until(EC.element_to_be_clickable(
-                    (By.XPATH, "//button[contains(@class, 'next-pagination-item')]//span[text()='1']")
-                ))
-                driver.execute_script("arguments[0].click();", first_page_btn)
-                time.sleep(2)
-                log_message(driver, "已切換到第一頁，開始處理工單")
-            except Exception as e:
-                log_message(driver, f"切換到第一頁時發生錯誤: {str(e)}，假設已在第一頁")
+            # while has_next_page:
+            #     print(f"\n正在處理第 {current_page} 頁的工單...")
+            #     log_message(driver, f"\n正在處理第 {current_page} 頁的工單...")
+                
+            #     # 強制重新獲取頁面元素
+            #     driver.execute_script("location.reload(true);")  # 強制硬刷新
+            #     wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
+            #     time.sleep(5)
+                
+            #     # 使用新版處理函式
+            #     page_has_content = process_current_page(driver, processed_orders, current_page)
+                
+            #     if not page_has_content:
+            #         has_next_page = False
+            #         break
+                
+            #     # 切換頁面前確認所有窗口已關閉
+            #     if len(driver.window_handles) > 1:
+            #         for handle in driver.window_handles[1:]:
+            #             driver.switch_to.window(handle)
+            #             driver.close()
+            #         driver.switch_to.window(original_window)
+                
+            #     # 頁面切換邏輯加強(約1040-1054行)
+            #     try:
+            #         next_page = current_page + 1
+            #         next_page_btn = WebDriverWait(driver, 10).until(
+            #             EC.element_to_be_clickable((By.XPATH, f"//button[contains(@class, 'next-pagination-item')]//span[text()='{next_page}']"))
+            #         )
+            #         driver.execute_script("arguments[0].scrollIntoView(true);", next_page_btn)
+            #         driver.execute_script("arguments[0].click();", next_page_btn)
+                    
+            #         # 新增頁面切換驗證
+            #         WebDriverWait(driver, 15).until(
+            #             lambda d: d.find_element(By.XPATH, f"//li[@title='{next_page}']").get_attribute("class") == "next-pagination-item next-active"
+            #         )
+            #         current_page = next_page
+            #         time.sleep(5)
+            #     except Exception as e:
+            #         print(f"頁面切換失敗: {str(e)}，可能已是最後一頁")
+            #         has_next_page = False
             
-            # 處理所有頁面
-            while has_more_pages:
-                # 強制重新獲取頁面元素
-                wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
-                time.sleep(3)
-                
-                # 處理當前頁面
-                log_message(driver, f"\n開始處理第 {current_page} 頁工單...")
-                # 重新讀取處理記錄，確保每頁處理前使用最新數據
-                processed_orders = load_processed_orders()
-                log_message(driver, f"已載入處理記錄，共 {len(processed_orders)} 個工單")
-                process_result = process_current_page(driver, processed_orders, current_page)
-                
-                # 檢查是否有下一頁
-                try:
-                    # 首先檢查是否有分頁器
-                    pagination_exists = False
-                    try:
-                        pagination = driver.find_element(By.XPATH, "//div[contains(@class, 'next-pagination')]")
-                        pagination_exists = True
-                        log_message(driver, "檢測到分頁器，準備尋找下一頁")
-                    except:
-                        log_message(driver, "未檢測到分頁器，僅有一頁工單")
-                        has_more_pages = False
-                        break
-                    
-                    if not pagination_exists:
-                        break
-                        
-                    # 獲取當前頁碼按鈕
-                    current_page_buttons = driver.find_elements(By.XPATH, "//button[contains(@class, 'next-pagination-item')]//span")
-                    
-                    # 收集所有頁碼
-                    page_numbers = []
-                    for button in current_page_buttons:
-                        try:
-                            page_text = button.text.strip()
-                            if page_text.isdigit():
-                                page_num = int(page_text)
-                                page_numbers.append(page_num)
-                        except ValueError:
-                            # 不是數字的按鈕（可能是下一頁按鈕等）
-                            continue
-                        except Exception as e:
-                            log_message(driver, f"處理頁碼按鈕時發生錯誤: {str(e)}")
-                            continue
-                    
-                    if not page_numbers:
-                        log_message(driver, "未找到任何頁碼按鈕，假設已到達最後一頁")
-                        has_more_pages = False
-                        break
-                    
-                    # 確定是否有下一頁
-                    next_page = current_page + 1
-                    log_message(driver, f"當前頁碼: {current_page}, 檢測到的所有頁碼: {page_numbers}")
-                    
-                    if next_page in page_numbers:
-                        # 找到並點擊下一頁按鈕
-                        next_page_btn = wait.until(EC.element_to_be_clickable(
-                            (By.XPATH, f"//button[contains(@class, 'next-pagination-item')]//span[text()='{next_page}']")
-                        ))
-                        driver.execute_script("arguments[0].scrollIntoView(true);", next_page_btn)
-                        driver.execute_script("arguments[0].click();", next_page_btn)
-                        log_message(driver, f"正在切換到第 {next_page} 頁...")
-                        time.sleep(3)  # 等待頁面加載
-                        
-                        # 等待頁面加載完成並確認已切換到正確的頁面
-                        try:
-                            active_page = wait.until(EC.presence_of_element_located(
-                                (By.XPATH, "//button[contains(@class, 'next-pagination-item') and contains(@class, 'next-current')]//span")
-                            ))
-                            if active_page.text.strip() == str(next_page):
-                                log_message(driver, f"已成功切換到第 {next_page} 頁")
-                                current_page = next_page
-                            else:
-                                log_message(driver, f"頁面切換異常，當前頁碼為 {active_page.text} 而非預期的 {next_page}")
-                                # 嘗試再次點擊
-                                driver.execute_script("arguments[0].click();", next_page_btn)
-                                time.sleep(3)
-                        except Exception as e:
-                            log_message(driver, f"確認頁面切換時發生錯誤: {str(e)}，假設已切換到第 {next_page} 頁")
-                            current_page = next_page
-                    else:
-                        log_message(driver, "已到達最後一頁，所有頁面處理完成")
-                        has_more_pages = False
-                except Exception as e:
-                    log_message(driver, f"檢查下一頁時發生錯誤: {str(e)}，假設已處理完所有頁面")
-                    has_more_pages = False
+            log_message(driver, "\n所有頁面的工單處理完成,等待2分鐘後重新檢查...")
+            time.sleep(120)
+            # 重新處理第一頁
+            log_message(driver, "\n重新處理第一頁工單...")
+            
+            # 強制重新獲取頁面元素
+            driver.execute_script("location.reload(true);")  # 強制硬刷新
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
+            time.sleep(5)
+            
+            # 使用新版處理函式處理第一頁
+            process_current_page(driver, processed_orders, 1)
             
             # 切換頁面前確認所有窗口已關閉
             if len(driver.window_handles) > 1:
@@ -1468,21 +1322,11 @@ try:
                     driver.switch_to.window(handle)
                     driver.close()
                 driver.switch_to.window(original_window)
-                
-            log_message(driver, "\n所有頁面的工單處理完成，等待5分鐘後重新檢查...")
-            time.sleep(300)  # 等待5分鐘後重新開始
-            
-            # 重新載入頁面準備下一輪處理
-            log_message(driver, "重新載入頁面，準備下一輪處理...")
-            driver.get(target_url)
-            wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
-            time.sleep(5)  # 等待動態內容載入
             
         except Exception as e:
-            log_message(driver, f"處理工單時發生錯誤: {str(e)}")
+            log_message(driver, f"檢查工單時發生錯誤: {str(e)}")
             log_message(driver, "等待5分鐘後重試...")
-            time.sleep(300)
+            time.sleep(120)
             continue
     
 except KeyboardInterrupt:
