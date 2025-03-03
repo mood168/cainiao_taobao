@@ -1365,7 +1365,7 @@ try:
 
                                                             if PpsType in ['EIN61', 'PPS303']:
                                                                 time.sleep(1)
-                                                                messageInfoNew = "包裹遺失將進行賠償程序"
+                                                                messageInfoNew = f"包裹遺失將進行賠償程序"
                                                                 # 找到 textarea 元素
                                                                 memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
                                                                     (By.CSS_SELECTOR, 'textarea[name="memo"]')
@@ -1430,7 +1430,7 @@ try:
                                                                 tracking_info_new = f"包裹已配達門市，煩請通知顧客盡快前往門市取件，感謝"
 
                                                             elif PpsType in ['EIN09']:
-                                                                tracking_info_new = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
+                                                                tracking_info_new = f"我方未收到包裹，請與菜鳥台灣倉確認，感謝"
 
                                                             elif PpsType in ['EIN36', 'PPS015']:
                                                                 issue_future_date = (Npps_Date + timedelta(days=7)).strftime("%m/%d")
@@ -1647,7 +1647,7 @@ try:
 
                                                     else:
                                                         # 初始化 tracking_info_new 變量
-                                                        tracking_info_new = "非7-11運單號，無法查詢，請提供二段運單號，謝謝"
+                                                        tracking_info_new = f"非7-11運單號，無法查詢，請提供二段運單號，謝謝"
                                                         
                                                         # 沒有下拉選單的情況
                                                         memo_textarea = WebDriverWait(driver, 2).until(EC.presence_of_element_located(
