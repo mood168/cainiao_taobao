@@ -110,14 +110,67 @@ def process_current_page(driver, processed_orders, current_page):
             
         log_message(driver, f"開始處理第 {current_page} 頁的 {len(current_page_links)} 個工單")
 
-        for index, order_link in enumerate(current_page_links, 1):
+        # 過濾出非投訴工單
+        non_complaint_links = []
+        for link in current_page_links:
+            try:
+                order_id = link.text.strip()
+                
+                # 檢查是否已處理過
+                if order_id in processed_orders:
+                    log_message(driver, f"工單 {order_id} 已處理過，跳過")
+                    continue
+                
+                # 獲取當前連結所在的行
+                row = link.find_element(By.XPATH, "./ancestor::tr")
+                
+                # 檢查工單類型欄位（第二列）
+                try:
+                    order_type_cell = row.find_element(By.XPATH, "./td[2]//div[contains(@class, 'next-table-cell-wrapper')]")
+                    order_type = order_type_cell.text.strip()
+                    
+                    # 檢查是否為投訴工單
+                    if "投诉工单" in order_type:
+                        log_message(driver, f"工單 {order_id} 為投诉工单，跳過處理")
+                        # 將投訴工單添加到已處理記錄中，避免重複檢查
+                        order_url = link.get_attribute('href')
+                        save_processed_order(order_id, order_url, driver=driver)
+                        continue
+                except Exception as e:
+                    log_message(driver, f"檢查工單類型時發生錯誤: {str(e)}")
+                
+                # 檢查整行文本是否包含投訴相關關鍵詞
+                row_text = row.text.lower()
+                complaint_indicators = ["投诉", "投诉工单", "投诉处理", "客诉"]
+                is_complaint = any(indicator in row_text for indicator in complaint_indicators)
+                
+                if is_complaint:
+                    log_message(driver, f"工單 {order_id} 可能為投訴工單，跳過處理")
+                    # 將投訴工單添加到已處理記錄中，避免重複檢查
+                    order_url = link.get_attribute('href')
+                    save_processed_order(order_id, order_url, driver=driver)
+                    continue
+                
+                # 如果不是投訴工單，添加到待處理列表
+                non_complaint_links.append(link)
+                
+            except StaleElementReferenceException:
+                log_message(driver, "處理工單連結時發現元素已失效，跳過此連結")
+                continue
+            except Exception as e:
+                log_message(driver, f"處理工單連結時發生錯誤: {str(e)}，跳過此連結")
+                continue
+        
+        log_message(driver, f"過濾後剩餘 {len(non_complaint_links)} 個非投訴工單")
+
+        for index, order_link in enumerate(non_complaint_links, 1):
             try:
                 process_single_order(
                     driver=driver,
                     order_link=order_link,
                     processed_orders=processed_orders,
                     index=index,
-                    total_orders=len(current_page_links),
+                    total_orders=len(non_complaint_links),
                     page_number=current_page
                 )
                 
@@ -166,38 +219,58 @@ def process_current_page(driver, processed_orders, current_page):
             print(f"關閉錯誤窗口時發生異常: {str(close_error)}")
         return False
 
-def process_single_order(driver, order_link, processed_orders, index, total_orders, page_number):
-    wait = WebDriverWait(driver, 30)
+def process_single_order(driver, link, processed_orders, index=0, total_orders=0, page_number=1):
+    """處理單個工單"""
     original_window = driver.current_window_handle
     current_order_id = None
-    order_url = None
     
     try:
-        # 驗證元素是否仍有效
-        order_link.is_enabled()  
-        current_order_id = order_link.text
-        order_url = order_link.get_attribute('href')
-    except StaleElementReferenceException:
-        print(f"第 {page_number} 頁的工單連結已失效，重新獲取...")
-        return
-    
-    try:
-        # 每次處理前重新讀取處理記錄文件，確保使用最新數據
-        updated_processed_orders = load_processed_orders()
+        # 獲取工單ID和URL
+        current_order_id = link.text.strip()
+        order_url = link.get_attribute('href')
         
         # 檢查是否已處理過
-        if current_order_id in updated_processed_orders:
-            log_message(driver, f"\n工單 {current_order_id} 已於 {updated_processed_orders[current_order_id]['processed_time']} 處理過,跳過處理")
+        if current_order_id in processed_orders:
+            log_message(driver, f"工單 {current_order_id} 已處理過，跳過")
             return
-            
-        log_message(driver, f"開始處理第 {page_number} 頁的第 {index}/{total_orders} 個工單: {current_order_id}")
         
-        # 在開始處理前先保存到記錄中
+        # 獲取當前連結所在的行
+        row = link.find_element(By.XPATH, "./ancestor::tr")
+        
+        # 檢查是否為投訴工單
+        try:
+            # 檢查工單類型欄位（第二列）
+            order_type_cell = row.find_element(By.XPATH, "./td[2]//div[contains(@class, 'next-table-cell-wrapper')]")
+            order_type = order_type_cell.text.strip()
+            
+            if "投诉工单" in order_type:
+                log_message(driver, f"工單 {current_order_id} 為投诉工单，跳過處理")
+                # 將投訴工單添加到已處理記錄中
+                save_processed_order(current_order_id, order_url, driver=driver)
+                return
+            
+            # 檢查整行文本是否包含投訴相關關鍵詞
+            row_text = row.text.lower()
+            complaint_indicators = ["投诉", "投诉工单", "投诉处理", "客诉"]
+            is_complaint = any(indicator.lower() in row_text.lower() for indicator in complaint_indicators)
+            
+            if is_complaint:
+                log_message(driver, f"工單 {current_order_id} 可能為投訴工單，跳過處理")
+                # 將投訴工單添加到已處理記錄中
+                save_processed_order(current_order_id, order_url, driver=driver)
+                return
+        except Exception as e:
+            log_message(driver, f"檢查工單類型時發生錯誤: {str(e)}")
+        
+        # 如果不是投訴工單，繼續處理
+        log_message(driver, f"處理第 {page_number} 頁的第 {index}/{total_orders} 個工單: {current_order_id}")
+        
+        # 在開始處理前先保存到記錄中,避免重複處理
         save_processed_order(current_order_id, order_url, driver=driver)
         
         # 點擊工單連結並切換到新窗口
         old_handles = driver.window_handles
-        driver.execute_script("arguments[0].click();", order_link)
+        driver.execute_script("arguments[0].click();", link)
         
         # 等待新窗口出現並切換
         wait.until(lambda d: len(d.window_handles) > len(old_handles))
@@ -207,6 +280,36 @@ def process_single_order(driver, order_link, processed_orders, index, total_orde
         # 等待頁面加載
         wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
         time.sleep(3)
+
+        # 檢查是否為投诉工单 - 更全面的檢查
+        try:
+            # 檢查方法1: 直接查找包含"投诉工单"文字的元素
+            complaint_elements = driver.find_elements(By.XPATH, "//*[contains(text(), '投诉工单')]")
+            
+            # 檢查方法2: 檢查頁面標題或其他關鍵區域
+            page_title_elements = driver.find_elements(By.XPATH, "//h1 | //h2 | //h3 | //div[contains(@class, 'title')]")
+            title_texts = [elem.text for elem in page_title_elements]
+            title_has_complaint = any("投诉" in text for text in title_texts)
+            
+            # 檢查方法3: 檢查工單類型欄位
+            type_elements = driver.find_elements(By.XPATH, "//label[contains(text(), '工单类型')]/following-sibling::*")
+            type_texts = [elem.text for elem in type_elements]
+            type_is_complaint = any("投诉" in text for text in type_texts)
+            
+            # 檢查方法4: 檢查整個頁面的文本
+            page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+            complaint_indicators = ["投诉工单", "投诉处理", "客诉", "投诉单"]
+            has_complaint_indicator = any(indicator in page_text for indicator in complaint_indicators)
+            
+            if complaint_elements or title_has_complaint or type_is_complaint or has_complaint_indicator:
+                log_message(driver, f"工單 {current_order_id} 為投诉工单，關閉頁面並跳過處理") 
+                driver.close()
+                driver.switch_to.window(original_window)
+                return
+            
+            log_message(driver, f"工單 {current_order_id} 不是投诉工单，繼續處理")
+        except Exception as e:
+            log_message(driver, f"檢查工單類型時發生錯誤: {str(e)}，假設不是投诉工单並繼續處理")
 
         # 確保在"工单基本信息"標籤頁
         info_tab = wait.until(EC.presence_of_element_located(
@@ -424,53 +527,72 @@ try:
         except Exception as e:
             log_message(driver, f"檢查或切換頁面時發生錯誤: {str(e)}")
         
-        all_order_links = []  # 存儲所有頁面的工單連結
+        non_complaint_links = []  # 存儲所有非投訴工單連結
         
         # 獲取當前頁面的工單連結
         try:
-            # 使用明確的等待條件查找工單連結           
-            # 尋找包含"投诉工单"文字的表格單元格
-            complaint_cells = driver.find_elements(By.XPATH, "//div[contains(@class, 'next-table-cell-wrapper') and contains(text(), '投诉工单')]")
+            # 找出所有工單連結
+            all_links = wait.until(EC.presence_of_all_elements_located(
+                (By.XPATH, "//table//a[string-length(text())=14 and translate(text(), '0123456789', '') = '']")
+            ))
             
-            if complaint_cells:
-                log_message(driver, "檢測到投诉工单欄位，將跳過這些工單")
-                
-                # 找出所有不是投诉工单的工單連結
-                all_links = wait.until(EC.presence_of_all_elements_located(
-                    (By.XPATH, "//table//a[string-length(text())=14 and translate(text(), '0123456789', '') = '']")
-                ))
-                
-                # 過濾掉投诉工单的連結
-                filtered_links = []
-                for link in all_links:
+            log_message(driver, f"找到 {len(all_links)} 個工單連結，開始檢查是否為投訴工單")
+            
+            # 載入已處理的工單記錄
+            processed_orders = load_processed_orders()
+            
+            # 過濾掉投诉工单的連結和已處理的工單
+            for link in all_links:
+                try:
+                    # 獲取工單ID和URL
+                    order_id = link.text.strip()
+                    order_url = link.get_attribute('href')
+                    
+                    # 檢查是否已處理過
+                    if order_id in processed_orders:
+                        log_message(driver, f"工單 {order_id} 已處理過，跳過")
+                        continue
+                    
                     # 獲取當前連結所在的行
                     row = link.find_element(By.XPATH, "./ancestor::tr")
                     
-                    # 檢查該行是否包含投诉工单欄位
-                    complaint_in_row = row.find_elements(By.XPATH, ".//div[contains(@class, 'next-table-cell-wrapper') and contains(text(), '投诉工单')]")
+                    # 檢查該行的工單類型欄位是否為「投诉工单」
+                    # 獲取第二列（工單類型）的內容
+                    order_type_cell = row.find_element(By.XPATH, "./td[2]//div[contains(@class, 'next-table-cell-wrapper')]")
+                    order_type = order_type_cell.text.strip()
                     
-                    if not complaint_in_row:
-                        filtered_links.append(link)
-                    else:
-                        log_message(driver, f"此單為:投诉工单")
-                        try:
-                            order_id = link.text.strip()
-                            order_url = link.get_attribute('href')
-                            save_processed_order(order_id, order_url, driver=driver)
-                        except Exception as e:
-                            log_message(driver, f"查找工單連結時發生錯誤: {str(e)}")
-
-                
-                log_message(driver, f"過濾後剩餘 {len(filtered_links)} 個非投诉工单的工單連結")
-                current_page_links = filtered_links
-                
+                    if "投诉工单" in order_type:
+                        log_message(driver, f"跳過投诉工单: {order_id}，類型: {order_type}")
+                        # 直接將投訴工單添加到已處理記錄中，避免後續重複處理
+                        save_processed_order(order_id, order_url, driver=driver)
+                        continue
+                    
+                    # 檢查是否有其他標記表明這是投訴工單
+                    complaint_indicators = [
+                        "投诉", "投诉工单", "投诉处理", "客诉"
+                    ]
+                    
+                    row_text = row.text.lower()
+                    is_complaint = any(indicator.lower() in row_text.lower() for indicator in complaint_indicators)
+                    
+                    if is_complaint:
+                        log_message(driver, f"檢測到可能的投訴工單: {order_id}，內容: {row_text[:50]}...")
+                        # 直接將可能的投訴工單添加到已處理記錄中
+                        save_processed_order(order_id, order_url, driver=driver)
+                        continue
+                    
+                    # 如果不是投訴工單且未處理過，則添加到非投訴工單列表
+                    non_complaint_links.append(link)
+                    log_message(driver, f"保留非投訴工單: {order_id}")
+                except Exception as e:
+                    log_message(driver, f"檢查工單類型時發生錯誤: {str(e)}，跳過此工單")
+                    # 如果無法確定是否為投訴工單，為安全起見不處理
+                    continue
             
+            log_message(driver, f"過濾後剩餘 {len(non_complaint_links)} 個非投诉工单的工單連結")
             
-            if current_page_links:
-                all_order_links.extend(current_page_links)
-                # log_message(driver, f"在當前頁面找到 {len(current_page_links)} 個工單連結")
-            else:
-                log_message(driver, "當前頁面沒有找到工單連結")
+            if not non_complaint_links:
+                log_message(driver, "當前頁面沒有找到非投訴工單連結")
                 return []
                 
         except Exception as e:
@@ -481,7 +603,7 @@ try:
         unique_order_links = []
         seen_order_ids = set()
         
-        for link in all_order_links:
+        for link in non_complaint_links:
             try:
                 order_id = link.text.strip()
                 if order_id and order_id not in seen_order_ids:
@@ -491,7 +613,7 @@ try:
                 print(f"處理工單連結時發生錯誤: {str(e)}")
                 continue
         
-        # log_message(driver, f"總共找到 {len(unique_order_links)} 個有效工單連結")
+        log_message(driver, f"總共找到 {len(unique_order_links)} 個有效非投訴工單連結")
         return unique_order_links
 
     def load_processed_orders():
@@ -586,9 +708,62 @@ try:
 
     # 獲取所有工單連結
     order_links = retry_operation(find_order_links, max_retries=10, delay=3)
-    print(order_links)
+    
+    # 再次檢查並過濾投訴工單，確保order_links中不包含投訴工單
+    filtered_order_links = []
+    processed_orders = load_processed_orders()
+    
+    for link in order_links:
+        try:
+            order_id = link.text.strip()
+            
+            # 如果已處理過，跳過
+            if order_id in processed_orders:
+                log_message(driver, f"工單 {order_id} 已處理過，跳過")
+                continue
+            
+            # 獲取當前連結所在的行
+            row = link.find_element(By.XPATH, "./ancestor::tr")
+            
+            # 檢查工單類型欄位（第二列）
+            try:
+                order_type_cell = row.find_element(By.XPATH, "./td[2]//div[contains(@class, 'next-table-cell-wrapper')]")
+                order_type = order_type_cell.text.strip()
+                
+                # 檢查是否為投訴工單
+                if "投诉工单" in order_type:
+                    log_message(driver, f"工單 {order_id} 為投诉工单，跳過處理")
+                    # 將投訴工單添加到已處理記錄中，避免重複檢查
+                    order_url = link.get_attribute('href')
+                    save_processed_order(order_id, order_url, driver=driver)
+                    continue
+            except Exception as e:
+                log_message(driver, f"檢查工單類型時發生錯誤: {str(e)}")
+            
+            # 檢查整行文本是否包含投訴相關關鍵詞
+            row_text = row.text.lower()
+            complaint_indicators = ["投诉", "投诉工单", "投诉处理", "客诉"]
+            is_complaint = any(indicator.lower() in row_text.lower() for indicator in complaint_indicators)
+            
+            if is_complaint:
+                log_message(driver, f"工單 {order_id} 可能為投訴工單，跳過處理")
+                # 將投訴工單添加到已處理記錄中，避免重複檢查
+                order_url = link.get_attribute('href')
+                save_processed_order(order_id, order_url, driver=driver)
+                continue
+            
+            # 如果不是投訴工單，添加到過濾後的列表
+            filtered_order_links.append(link)
+            
+        except Exception as e:
+            log_message(driver, f"過濾工單連結時發生錯誤: {str(e)}，跳過此工單")
+            continue
+    
+    # 使用過濾後的工單列表替換原始列表
+    order_links = filtered_order_links
+    
     total_orders = len(order_links)
-    log_message(driver, f"總共有 {total_orders} 個工單需要處理")
+    log_message(driver, f"總共有 {total_orders} 個非投訴工單需要處理")
      # 導回第一頁
     try:
         first_page_btn = driver.find_element(By.XPATH, "//button[contains(@class, 'next-pagination-item')]//span[text()='1']")
@@ -620,6 +795,35 @@ try:
             else:
                 log_message(driver, f"\n開始處理第 {index}/{total_orders} 個工單: {current_order_id}")
                 print(f"工單URL: {order_url}")
+                
+                # 在開始處理前先檢查是否為投訴工單
+                try:
+                    # 獲取當前連結所在的行
+                    row = order_link.find_element(By.XPATH, "./ancestor::tr")
+                    
+                    # 檢查工單類型欄位（第二列）
+                    order_type_cell = row.find_element(By.XPATH, "./td[2]//div[contains(@class, 'next-table-cell-wrapper')]")
+                    order_type = order_type_cell.text.strip()
+                    
+                    # 檢查是否為投訴工單
+                    if "投诉工单" in order_type:
+                        log_message(driver, f"工單 {current_order_id} 為投诉工单，跳過處理")
+                        # 將投訴工單添加到已處理記錄中，避免重複檢查
+                        save_processed_order(current_order_id, order_url, driver=driver)
+                        continue
+                    
+                    # 檢查整行文本是否包含投訴相關關鍵詞
+                    row_text = row.text.lower()
+                    complaint_indicators = ["投诉", "投诉工单", "投诉处理", "客诉"]
+                    is_complaint = any(indicator in row_text for indicator in complaint_indicators)
+                    
+                    if is_complaint:
+                        log_message(driver, f"工單 {current_order_id} 可能為投訴工單，跳過處理")
+                        # 將投訴工單添加到已處理記錄中，避免重複檢查
+                        save_processed_order(current_order_id, order_url, driver=driver)
+                        continue
+                except Exception as e:
+                    log_message(driver, f"檢查工單類型時發生錯誤: {str(e)}，繼續處理")
                 
                 # 在開始處理前先保存到記錄中,避免重複處理
                 save_processed_order(current_order_id, order_url)
@@ -1568,142 +1772,126 @@ try:
             wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
             time.sleep(5)  # 等待動態內容載入
             
-            # 處理所有頁面的工單
-            current_page = 1
-            has_more_pages = True
-
-            # 檢查是否有新工單
-            log_message(driver, "檢查是否有新工單...")
-            order_links = find_order_links()
-            
-            if not order_links:
-                log_message(driver, "沒有找到新工單，等待下一次檢查, 等待5分鐘後再次檢查")
-                time.sleep(300)  # 等待5分鐘後再次檢查
-                continue
-                
-            log_message(driver, f"找到 {len(order_links)} 個待處理工單")
+            # 先切換到第一頁，確保從頭開始處理
+            try:
+                first_page_btn = wait.until(EC.element_to_be_clickable(
+                    (By.XPATH, "//button[contains(@class, 'next-pagination-item')]//span[text()='1']")
+                ))
+                driver.execute_script("arguments[0].click();", first_page_btn)
+                time.sleep(2)
+                log_message(driver, "已切換到第一頁，開始處理工單")
+            except Exception as e:
+                log_message(driver, f"切換到第一頁時發生錯誤: {str(e)}，假設已在第一頁")
             
             # 載入已處理的工單記錄
             processed_orders = load_processed_orders()
             log_message(driver, f"已載入處理記錄，共 {len(processed_orders)} 個工單")
             
-            # 處理找到的工單
-            for link in order_links:
+            # 處理所有頁面的工單
+            current_page = 1
+            has_more_pages = True
+            total_processed = 0
+            
+            while has_more_pages:
+                # 檢查是否有工單
+                log_message(driver, f"檢查第 {current_page} 頁是否有新工單...")
+                
+                # 直接在頁面上識別和過濾投訴工單
                 try:
-                    order_id = link.text.strip()
-                    if order_id in processed_orders:
-                        log_message(driver, f"工單 {order_id} 已處理過，跳過")
-                        continue
-                        
-                    log_message(driver, f"開始處理工單: {order_id}")
-                    process_single_order(driver, link, processed_orders, index=1, total_orders=len(order_links), page_number=current_page)
+                    # 等待表格完全加載
+                    wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
+                    time.sleep(3)  # 確保表格內容已完全加載
+                    
+                    # 找出所有工單連結
+                    all_links = wait.until(EC.presence_of_all_elements_located(
+                        (By.XPATH, "//table//a[string-length(text())=14 and translate(text(), '0123456789', '') = '']")
+                    ))
+                    
+                    log_message(driver, f"在第 {current_page} 頁找到 {len(all_links)} 個工單連結")
+                    
+                    # 過濾投訴工單
+                    non_complaint_links = []
+                    for link in all_links:
+                        try:
+                            order_id = link.text.strip()
+                            
+                            # 如果已處理過，跳過
+                            if order_id in processed_orders:
+                                log_message(driver, f"工單 {order_id} 已處理過，跳過")
+                                continue
+                            
+                            # 獲取當前連結所在的行
+                            row = link.find_element(By.XPATH, "./ancestor::tr")
+                            
+                            # 檢查工單類型欄位（第二列）
+                            try:
+                                order_type_cell = row.find_element(By.XPATH, "./td[2]//div[contains(@class, 'next-table-cell-wrapper')]")
+                                order_type = order_type_cell.text.strip()
+                                
+                                # 檢查是否為投訴工單
+                                if "投诉工单" in order_type:
+                                    log_message(driver, f"工單 {order_id} 為投诉工单，跳過處理")
+                                    # 將投訴工單添加到已處理記錄中，避免重複檢查
+                                    order_url = link.get_attribute('href')
+                                    save_processed_order(order_id, order_url, driver=driver)
+                                    continue
+                            except Exception as e:
+                                log_message(driver, f"檢查工單類型時發生錯誤: {str(e)}")
+                            
+                            # 檢查整行文本是否包含投訴相關關鍵詞
+                            row_text = row.text.lower()
+                            complaint_indicators = ["投诉", "投诉工单", "投诉处理", "客诉"]
+                            is_complaint = any(indicator.lower() in row_text.lower() for indicator in complaint_indicators)
+                            
+                            if is_complaint:
+                                log_message(driver, f"工單 {order_id} 可能為投訴工單，跳過處理")
+                                # 將投訴工單添加到已處理記錄中，避免重複檢查
+                                order_url = link.get_attribute('href')
+                                save_processed_order(order_id, order_url, driver=driver)
+                                continue
+                            
+                            # 如果不是投訴工單，添加到待處理列表
+                            non_complaint_links.append(link)
+                            
+                        except Exception as e:
+                            log_message(driver, f"處理工單連結時發生錯誤: {str(e)}，跳過此工單")
+                            continue
+                    
+                    log_message(driver, f"在第 {current_page} 頁找到 {len(non_complaint_links)} 個非投訴工單")
+                    
+                    # 處理非投訴工單
+                    for index, link in enumerate(non_complaint_links, 1):
+                        try:
+                            order_id = link.text.strip()
+                            log_message(driver, f"開始處理第 {current_page} 頁的第 {index}/{len(non_complaint_links)} 個工單: {order_id}")
+                            process_single_order(driver, link, processed_orders, index=index, total_orders=len(non_complaint_links), page_number=current_page)
+                            total_processed += 1
+                        except Exception as e:
+                            log_message(driver, f"處理工單時發生錯誤: {str(e)}")
                     
                 except Exception as e:
-                    log_message(driver, f"處理工單時發生錯誤: {str(e)}")
-                    
-            # 處理完當前頁面後，等待一段時間再檢查新工單
-            log_message(driver, "當前頁面工單處理完成，等待下一次檢查, 等待5分鐘後再次檢查")
-            time.sleep(300)  # 等待5分鐘後再次檢查
-            
-            # # 先切換到第一頁，確保從頭開始處理
-            # try:
-            #     first_page_btn = wait.until(EC.element_to_be_clickable(
-            #         (By.XPATH, "//button[contains(@class, 'next-pagination-item')]//span[text()='1']")
-            #     ))
-            #     driver.execute_script("arguments[0].click();", first_page_btn)
-            #     time.sleep(2)
-            #     log_message(driver, "已切換到第一頁，開始處理工單")
-            # except Exception as e:
-            #     log_message(driver, f"切換到第一頁時發生錯誤: {str(e)}，假設已在第一頁")
-            
-            # # 處理所有頁面
-            # while has_more_pages:
-            #     # 強制重新獲取頁面元素
-            #     wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
-            #     time.sleep(3)
+                    log_message(driver, f"處理第 {current_page} 頁工單時發生錯誤: {str(e)}")
                 
-            #     # 處理當前頁面
-            #     log_message(driver, f"\n開始處理第 {current_page} 頁工單...")
-            #     # 重新讀取處理記錄，確保每頁處理前使用最新數據
-            #     processed_orders = load_processed_orders()
-            #     log_message(driver, f"已載入處理記錄，共 {len(processed_orders)} 個工單")
-            #     process_result = process_current_page(driver, processed_orders, current_page)
-                
-            #     # 檢查是否有下一頁
-            #     try:
-            #         # 首先檢查是否有分頁器
-            #         pagination_exists = False
-            #         try:
-            #             pagination = driver.find_element(By.XPATH, "//div[contains(@class, 'next-pagination')]")
-            #             pagination_exists = True
-            #             log_message(driver, "檢測到分頁器，準備尋找下一頁")
-            #         except:
-            #             log_message(driver, "未檢測到分頁器，僅有一頁工單")
-            #             has_more_pages = False
-            #             break
-                    
-            #         if not pagination_exists:
-            #             break
-                        
-            #         # 獲取當前頁碼按鈕
-            #         current_page_buttons = driver.find_elements(By.XPATH, "//button[contains(@class, 'next-pagination-item')]//span")
-                    
-            #         # 收集所有頁碼
-            #         page_numbers = []
-            #         for button in current_page_buttons:
-            #             try:
-            #                 page_text = button.text.strip()
-            #                 if page_text.isdigit():
-            #                     page_num = int(page_text)
-            #                     page_numbers.append(page_num)
-            #             except ValueError:
-            #                 # 不是數字的按鈕（可能是下一頁按鈕等）
-            #                 continue
-            #             except Exception as e:
-            #                 log_message(driver, f"處理頁碼按鈕時發生錯誤: {str(e)}")
-            #                 continue
-                    
-            #         if not page_numbers:
-            #             log_message(driver, "未找到任何頁碼按鈕，假設已到達最後一頁")
-            #             has_more_pages = False
-            #             break
-                    
-            #         # 確定是否有下一頁
-            #         next_page = current_page + 1
-            #         log_message(driver, f"當前頁碼: {current_page}, 檢測到的所有頁碼: {page_numbers}")
-                    
-            #         if next_page in page_numbers:
-            #             # 找到並點擊下一頁按鈕
-            #             next_page_btn = wait.until(EC.element_to_be_clickable(
-            #                 (By.XPATH, f"//button[contains(@class, 'next-pagination-item')]//span[text()='{next_page}']")
-            #             ))
-            #             driver.execute_script("arguments[0].scrollIntoView(true);", next_page_btn)
-            #             driver.execute_script("arguments[0].click();", next_page_btn)
-            #             log_message(driver, f"正在切換到第 {next_page} 頁...")
-            #             time.sleep(3)  # 等待頁面加載
-                        
-            #             # 等待頁面加載完成並確認已切換到正確的頁面
-            #             try:
-            #                 active_page = wait.until(EC.presence_of_element_located(
-            #                     (By.XPATH, "//button[contains(@class, 'next-pagination-item') and contains(@class, 'next-current')]//span")
-            #                 ))
-            #                 if active_page.text.strip() == str(next_page):
-            #                     log_message(driver, f"已成功切換到第 {next_page} 頁")
-            #                     current_page = next_page
-            #                 else:
-            #                     log_message(driver, f"頁面切換異常，當前頁碼為 {active_page.text} 而非預期的 {next_page}")
-            #                     # 嘗試再次點擊
-            #                     driver.execute_script("arguments[0].click();", next_page_btn)
-            #                     time.sleep(3)
-            #             except Exception as e:
-            #                 log_message(driver, f"確認頁面切換時發生錯誤: {str(e)}，假設已切換到第 {next_page} 頁")
-            #                 current_page = next_page
-            #         else:
-            #             log_message(driver, "已到達最後一頁，所有頁面處理完成")
-            #             has_more_pages = False
-            #     except Exception as e:
-            #         log_message(driver, f"檢查下一頁時發生錯誤: {str(e)}，假設已處理完所有頁面")
-            #         has_more_pages = False
+                # 檢查是否有下一頁
+                try:
+                    next_page_btn = driver.find_element(By.XPATH, "//button[contains(@class, 'next-pagination-next')]")
+                    if "disabled" in next_page_btn.get_attribute("class"):
+                        log_message(driver, f"已到達最後一頁（第 {current_page} 頁）")
+                        has_more_pages = False
+                    else:
+                        driver.execute_script("arguments[0].click();", next_page_btn)
+                        current_page += 1
+                        time.sleep(3)  # 等待頁面加載
+                        log_message(driver, f"已切換到第 {current_page} 頁")
+                except Exception as e:
+                    log_message(driver, f"檢查下一頁: 沒有更多頁面了")
+                    has_more_pages = False
+            
+            # 處理完所有頁面後，等待一段時間再檢查新工單
+            if total_processed > 0:
+                log_message(driver, f"本輪共處理了 {total_processed} 個工單，等待5分鐘後再次檢查")
+            else:
+                log_message(driver, "沒有找到新工單，等待5分鐘後再次檢查")
             
             # 切換頁面前確認所有窗口已關閉
             if len(driver.window_handles) > 1:
@@ -1712,15 +1900,7 @@ try:
                     driver.close()
                 driver.switch_to.window(original_window)
                 
-            log_message(driver, "\n所有頁面的工單處理完成，等待5分鐘後重新檢查...")
-            time.sleep(300)  # 等待5分鐘後重新開始
-            
-            # 重新載入頁面準備下一輪處理
-            log_message(driver, "重新載入頁面，準備下一輪處理...")
-            driver.get(target_url)
-            wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, 'table')))
-            time.sleep(5)  # 等待動態內容載入
+            time.sleep(300)  # 等待5分鐘後再次檢查
             
         except Exception as e:
             log_message(driver, f"處理工單時發生錯誤: {str(e)}")
