@@ -35,6 +35,18 @@ driver = None
 def show_notification(driver, message):
     """顯示瀏覽器通知"""
     try:
+        # 檢查driver是否有效
+        if not driver or not hasattr(driver, 'execute_script'):
+            print(f"通知內容: {message}")
+            return
+            
+        # 嘗試執行一個簡單的JavaScript來檢查會話是否有效
+        try:
+            driver.execute_script("return true;")
+        except Exception:
+            print(f"通知內容: {message} (WebDriver會話無效)")
+            return
+            
         # 對消息進行轉義處理，避免 JavaScript 錯誤
         escaped_message = message.replace("'", "\\'").replace("\n", "\\n")
         script = """
@@ -119,11 +131,19 @@ def process_current_page(driver, processed_orders, current_page):
                 log_message(driver, f"處理第 {current_page} 頁的第 {index} 個工單時發生錯誤: {str(e)}，跳過")
                 # 確保返回原始窗口
                 try:
-                    if len(driver.window_handles) > 1:
+                    # 檢查driver會話是否有效
+                    driver.execute_script("return true;")
+                    
+                    # 檢查窗口數量
+                    current_handles = driver.window_handles
+                    if len(current_handles) > 1 and driver.current_window_handle != original_window:
                         driver.close()
-                    driver.switch_to.window(original_window)
-                except Exception:
-                    pass
+                    
+                    # 確保切換回原始窗口
+                    if original_window in driver.window_handles:
+                        driver.switch_to.window(original_window)
+                except Exception as close_error:
+                    print(f"關閉錯誤窗口時發生異常: {str(close_error)}")
                 continue
         
         return True
@@ -131,17 +151,26 @@ def process_current_page(driver, processed_orders, current_page):
         log_message(driver, f"處理第 {current_page} 頁時發生錯誤: {str(e)}")
         # 確保返回原始窗口
         try:
-            if driver.current_window_handle != original_window:
+            # 檢查driver會話是否有效
+            driver.execute_script("return true;")
+            
+            # 檢查當前窗口是否存在且不是原始窗口
+            current_handles = driver.window_handles
+            if len(current_handles) > 1 and driver.current_window_handle != original_window:
                 driver.close()
-            driver.switch_to.window(original_window)
-        except Exception:
-            pass
+            
+            # 確保切換回原始窗口
+            if original_window in driver.window_handles:
+                driver.switch_to.window(original_window)
+        except Exception as close_error:
+            print(f"關閉錯誤窗口時發生異常: {str(close_error)}")
         return False
 
 def process_single_order(driver, order_link, processed_orders, index, total_orders, page_number):
     wait = WebDriverWait(driver, 30)
     original_window = driver.current_window_handle
     current_order_id = None
+    order_url = None
     
     try:
         # 驗證元素是否仍有效
@@ -226,29 +255,40 @@ def process_single_order(driver, order_link, processed_orders, index, total_orde
                     print(f"處理行數據時發生錯誤: {str(e)}")
                     continue
         
-       
-        # 關閉當前窗口並切換回原始窗口
-        driver.close()
-        driver.switch_to.window(original_window)
+        # 處理完成，記錄成功信息
         log_message(driver, f"已完成工單 {current_order_id} 的處理")
         
     except Exception as e:
-        log_message(driver, f"處理工單 {current_order_id} 時發生錯誤: {str(e)}")
-        # 確保返回原始窗口
-        if driver.current_window_handle != original_window:
-            try:
-                driver.close()
-                driver.switch_to.window(original_window)
-            except Exception as close_error:
-                print(f"關閉錯誤窗口時發生異常: {str(close_error)}")
+        log_message(driver, f"處理工單 {current_order_id or '未知'} 時發生錯誤: {str(e)}")
     finally:
+        # 無論成功與否，都確保關閉新窗口並返回原始窗口
+        try:
+            # 檢查driver會話是否有效
+            driver.execute_script("return true;")
+            
+            # 檢查當前窗口是否存在且不是原始窗口
+            current_handles = driver.window_handles
+            if len(current_handles) > 1 and driver.current_window_handle != original_window:
+                driver.close()
+            
+            # 確保切換回原始窗口
+            if original_window in driver.window_handles:
+                driver.switch_to.window(original_window)
+        except Exception as close_error:
+            print(f"關閉窗口時發生錯誤: {str(close_error)}")
+        
+        # 無論成功與否都等待一下再處理下一個
         time.sleep(2)
 
 def log_message(driver, message):
     """同時執行 print 和瀏覽器通知"""
     print(message)
     if driver:
-        show_notification(driver, message)
+        try:
+            show_notification(driver, message)
+        except Exception as e:
+            print(f"顯示通知時發生錯誤: {str(e)}")
+            print(f"通知內容: {message}")
 
 try:
     print("開始執行自動化流程...")
@@ -413,7 +453,12 @@ try:
                         filtered_links.append(link)
                     else:
                         log_message(driver, f"此單為:投诉工单")
-                        save_processed_order(current_order_id, order_url, driver=driver)
+                        try:
+                            order_id = link.text.strip()
+                            order_url = link.get_attribute('href')
+                            save_processed_order(order_id, order_url, driver=driver)
+                        except Exception as e:
+                            log_message(driver, f"查找工單連結時發生錯誤: {str(e)}")
 
                 
                 log_message(driver, f"過濾後剩餘 {len(filtered_links)} 個非投诉工单的工單連結")
@@ -971,7 +1016,7 @@ try:
                                                                     messageInfo = f"超才"
                                                                 elif PpsType in ['EIN37', 'EIN38', 'EIN39']:
                                                                     issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%Y-%m-%d 00:00:00")
-                                                                    messageInfo = f"標籤條碼異常，無法刷讀"
+                                                                    messageInfo = f"標籤條碼異常，無法刷讀，預計{issue_future_date}退回清關行，謝謝"
                                                                 
 
                                                                 # 填寫具体原因
@@ -1169,16 +1214,16 @@ try:
                                                             ))
 
                                                             if PpsType in ['AOL', 'AOLL']:
-                                                                tracking_info_new = "已完成包裹成功取件，感謝"
+                                                                tracking_info_new = f"已完成包裹成功取件，感謝"
 
                                                             elif PpsType in ['EIN00', 'EIN60', 'EIN62', 'PPS022']:
-                                                                tracking_info_new = "包裹已送達物流中心，進行理貨中，後續將安排配送至取貨門市，感謝"
+                                                                tracking_info_new = f"包裹已送達物流中心，進行理貨中，後續將安排配送至取貨門市，感謝"
 
                                                             elif PpsType in ['PP00', 'PP01']:
-                                                                tracking_info_new = "包裹進行配送中，後續將安排配送至取貨門市，感謝"   
+                                                                tracking_info_new = f"包裹進行配送中，後續將安排配送至取貨門市，感謝"   
                                                         
                                                             elif PpsType in ['PPS101']:
-                                                                tracking_info_new = "包裹已配達門市，煩請通知顧客盡快前往門市取件，感謝"
+                                                                tracking_info_new = f"包裹已配達門市，煩請通知顧客盡快前往門市取件，感謝"
 
                                                             elif PpsType in ['EIN09']:
                                                                 tracking_info_new = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
@@ -1188,39 +1233,40 @@ try:
                                                                 tracking_info_new = f"門市關轉，預計{issue_future_date}退回清關行, 謝謝"
 
                                                             elif PpsType in ['EIN35']:
-                                                                tracking_info_new = "不正常到貨(因未上傳包裹資料或未於進貨日進貨)，我方無法驗收配送，預計{D+7天}退回清關行，謝謝"
+                                                                issue_future_date = (Npps_Date + timedelta(days=7)).strftime("%m/%d")
+                                                                tracking_info_new = f"不正常到貨(因未上傳包裹資料或未於進貨日進貨)，我方無法驗收配送，預計{issue_future_date}退回清關行, 謝謝"
                                                             
                                                             elif PpsType in ['EIN99']:
                                                                 issue_future_date = (Npps_Date + timedelta(days=7)).strftime("%m/%d")
-                                                                tracking_info_new = "超過進貨期限，配編已失效，預計{issue_future_date}退回清關行，謝謝"
+                                                                tracking_info_new = f"超過進貨期限，配編已失效，預計{issue_future_date}退回清關行，謝謝"
                                                             
                                                             elif PpsType in ['PPS201']:
                                                                 issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%m/%d")
-                                                                tracking_info_new = "逾期未取，預計{issue_future_date}退回清關行，謝謝"
+                                                                tracking_info_new = f"逾期未取，預計{issue_future_date}退回清關行，謝謝"
                                                             
                                                             elif PpsType in ['EIN31', 'EIN3A', 'EIN3B', 'EIN3C']:
                                                                 issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%m/%d")
-                                                                tracking_info_new = "進貨包裝不良，預計{issue_future_date}退回清關行，謝謝"
+                                                                tracking_info_new = f"進貨包裝不良，預計{issue_future_date}退回清關行，謝謝"
                                                             
                                                             elif PpsType in ['EIN32']:
                                                                 issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%m/%d")
-                                                                tracking_info_new = "超才，預計{issue_future_date}退回清關行，謝謝"
+                                                                tracking_info_new = f"超才，預計{issue_future_date}退回清關行，謝謝"
                                                             
                                                             elif PpsType in ['EIN37', 'EIN38', 'EIN39']:
                                                                 issue_future_date = (Npps_Date + timedelta(days=5)).strftime("%m/%d")
-                                                                tracking_info_new = "標籤條碼異常，無法刷讀，預計{issue_future_date}退回清關行，謝謝"
+                                                                tracking_info_new = f"標籤條碼異常，無法刷讀，預計{issue_future_date}退回清關行，謝謝"
                                                             
                                                             elif PpsType in ['EIN61', 'PPS303']:
-                                                                tracking_info_new = "包裹遺失將進行賠償程序，造成不便，敬請見諒，感謝"
+                                                                tracking_info_new = f"包裹遺失將進行賠償程序，造成不便，敬請見諒，感謝"
                                                             
                                                             elif PpsType in ['PPS013']:
-                                                                tracking_info_new = "因取件門市位於離島地區，船班需視當地海象氣候配送，包裹到店將發送簡訊通知，還請以到店簡訊通知為主，造成不便，敬請見諒，感謝"
+                                                                tracking_info_new = f"因取件門市位於離島地區，船班需視當地海象氣候配送，包裹到店將發送簡訊通知，還請以到店簡訊通知為主，造成不便，敬請見諒，感謝"
                                                             
                                                             elif PpsType in ['EIN63']:
-                                                                tracking_info_new = "包裹遺失將進行賠償程序，造成不便，敬請見諒，感謝"                                                    
+                                                                tracking_info_new = f"包裹遺失將進行賠償程序，造成不便，敬請見諒，感謝"                                                    
                                                             
                                                             elif PpsType in ['VIN']:
-                                                                tracking_info_new = "我方未收到包裹，請與菜鳥台灣倉確認，感謝"
+                                                                tracking_info_new = f"我方未收到包裹，請與菜鳥台灣倉確認，感謝"
                                                             # 處理超規格包裹
                                                             elif PpsType in ['EVR01', 'EDR01', 'EVR11', 'EVR12', 'EVR13', 'EVR14', 'EVR15', 'EVR21', 'EVR31', 'EVR32', 'EVR34', 'EVR35', 'EVR36', 'EVR37', 'EVR38', 'EVR39', 'EVR3A', 'EVR3B', 'EVR3C', 'EVR99']:
                                                                 return_future_date = (Npps_Date + timedelta(days=1)).strftime("%Y/%m/%d")
@@ -1472,20 +1518,43 @@ try:
                 
         except Exception as e:
             log_message(driver, f"處理工單 {current_order_id or '未知'} 時發生錯誤: {str(e)}")
-            if driver.current_window_handle != original_window:
-                try:
+            try:
+                # 檢查driver會話是否有效
+                driver.execute_script("return true;")
+                
+                # 檢查當前窗口是否存在且不是原始窗口
+                current_handles = driver.window_handles
+                if len(current_handles) > 1 and driver.current_window_handle != original_window:
                     driver.close()
                     driver.switch_to.window(original_window)
-                except Exception as close_error:
-                    log_message(driver, f"關閉錯誤窗口時發生異常: {str(close_error)}")
+            except Exception as close_error:
+                log_message(None, f"關閉錯誤窗口時發生異常: {str(close_error)}")
+                # 嘗試強制切換回原始窗口
+                try:
+                    if original_window in driver.window_handles:
+                        driver.switch_to.window(original_window)
+                except Exception:
+                    pass
         else:
             # 正常完成時的清理代碼
             try:
-                driver.close()
-                driver.switch_to.window(original_window)
-                print(f"已完成工單 {current_order_id} 的處理並關閉窗口")
+                # 檢查driver會話是否有效
+                driver.execute_script("return true;")
+                
+                # 檢查當前窗口是否存在且不是原始窗口
+                current_handles = driver.window_handles
+                if len(current_handles) > 1 and driver.current_window_handle != original_window:
+                    driver.close()
+                    driver.switch_to.window(original_window)
+                    print(f"已完成工單 {current_order_id} 的處理並關閉窗口")
             except Exception as close_error:
                 print(f"關閉窗口時發生錯誤: {str(close_error)}")
+                # 嘗試強制切換回原始窗口
+                try:
+                    if original_window in driver.window_handles:
+                        driver.switch_to.window(original_window)
+                except Exception:
+                    pass
         finally:
             time.sleep(2)  # 無論成功與否都等待一下再處理下一個
             
@@ -1670,3 +1739,11 @@ finally:
     #     driver.quit()
     #     print("瀏覽器已關閉")
     log_message(driver, f"所有頁面的工單處理完成")
+    # 關閉瀏覽器
+    try:
+        # 檢查driver會話是否有效
+        driver.execute_script("return true;")
+        driver.close()
+        print("已關閉瀏覽器")
+    except Exception as e:
+        print(f"關閉瀏覽器時發生錯誤: {str(e)}")
